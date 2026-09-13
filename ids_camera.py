@@ -304,9 +304,22 @@ class IdsCamera(BaseCamera):
                 # node's range, and a config value written under a
                 # different clock would otherwise be out of bounds.
                 exposure_min, exposure_max = self.exposure_time_range_us()
-                self.set_exposure_time_us(
-                    min(exposure_max, max(exposure_min, self._exposure_time_us))
-                )
+                # Exposure is a frame-rate budget, and a saved value can
+                # exceed it -- a 124ms calibration was found in the field,
+                # capping this camera at 8fps and blurring every frame of
+                # exactly the motion the recording exists to show. Clamping
+                # here rather than trusting config is the same reasoning
+                # CLAUDE.md applies to the budget itself: it belongs in code.
+                if self._target_fps:
+                    exposure_max = min(exposure_max, exposure_budget_us(self._target_fps))
+                wanted = self._exposure_time_us
+                if wanted > exposure_max:
+                    logger.warning(
+                        "%s: config exposure %.1fms exceeds the %.1ffps budget; using %.1fms. "
+                        "Recalibrate with more light at the instrument.",
+                        self.label, wanted / 1000, self._target_fps, exposure_max / 1000,
+                    )
+                self.set_exposure_time_us(min(exposure_max, max(exposure_min, wanted)))
             else:
                 auto_converge_nodes.append("ExposureAuto")
             if self._gain is not None:
@@ -342,7 +355,15 @@ class IdsCamera(BaseCamera):
             # budget our own calibration obeys, before letting it converge.
             self._apply_auto_exposure_limit()
             if self._converge_auto:
-                self._converge_auto_nodes(auto_converge_nodes)
+                try:
+                    self._converge_auto_nodes(auto_converge_nodes)
+                except IdsCameraConvergenceTimeoutError as exc:
+                    # Whatever it reached is locked and usable. Refusing to
+                    # open here would strand a student behind a disabled
+                    # Start over white balance -- which is visible in the
+                    # preview, and so is not a readiness gate. See
+                    # CLAUDE.md's "Who uses it".
+                    logger.warning("%s: %s; continuing with what it reached", self.label, exc)
 
             # After exposure/gain are settled, never before. This node's
             # own Maximum() is derived from the current ExposureTime, so

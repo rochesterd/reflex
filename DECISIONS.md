@@ -4785,3 +4785,45 @@ clipping point, so one number chosen at gain 1.0, the worst case, is safe
 for every calibration above it. `config.json` keeps a `black_level`
 override for the case that would actually need one: a camera swapped for a
 different revision, where a technician cannot wait for a release.
+
+---
+
+## 2026-09-13 - A 124ms calibration reached the field, and three things let it
+
+Reported as "motion blur and lagginess" from the BIO. The camera was
+delivering **8fps with 124ms of blur on every frame**, and `config.json`
+said so: `exposure_time_us: 124314.9`. Three separate failures had to line
+up, and each is worth fixing on its own.
+
+**1. Settings' exposure slider was bounded by the sensor, not the budget.**
+The Keeler's `ExposureTime` maximum is two seconds, so the slider offered
+two seconds. A technician could set -- and save -- an exposure that caps the
+camera at 8fps. CLAUDE.md already says exposure is a frame-rate budget and
+"belongs in code"; the slider was the one place that had not been told.
+It is now bounded by `exposure_budget_us(target_fps)`. A slider that cannot
+reach a bad value beats a warning about one that was saved.
+
+**2. `_open()` trusted the saved value.** It clamped to the device range
+only, so a bad config produced a bad session forever. It now clamps to the
+frame-rate budget too and says so in the log. The config file is left
+untouched: it is the technician's, and `config.py`'s startup warning still
+names it.
+
+**3. A white-balance convergence timeout failed the camera open outright.**
+At 124ms in a dim room `BalanceWhiteAuto` could not converge inside 5s, and
+the exception propagated -- the student would see the BIO simply refuse to
+start. Whatever the camera reached is locked and usable, and white balance
+is *visible* in the preview, so it is not a readiness gate by CLAUDE.md's
+own rule. It now warns and continues. This is the "still open, same bug
+class" note from 2026-09-10, closed by a real failure rather than a
+prediction.
+
+Verified on hardware: the same unchanged `config.json` now opens the camera
+and delivers **30.16fps with 0 dropped frames**, exposure clamped 124.3ms
+-> 30.0ms.
+
+**How it got there matters less than that nothing stopped it.** The value
+was saved from a dim scene during this session's gamma work. What the
+episode says is that a warning printed at startup -- which is all
+`exposure_fps_warnings()` did -- is not a control. Nobody reads a log on a
+kiosk.

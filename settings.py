@@ -54,6 +54,7 @@ from config import (
 from qt_image import bgr_to_pixmap
 from uvc_camera import UvcCamera
 from device_presets import CUSTOM_PROFILE_ID, profile_for_id, profile_for_model, profiles_for_role
+from exposure_calibration import exposure_budget_us
 from synthetic_camera import SyntheticCamera
 from uvc_enumeration import UvcDeviceInfo, list_uvc_devices
 
@@ -308,6 +309,12 @@ class PreviewDialog(QDialog):
         self, layout: QVBoxLayout, initial_exposure_time_us: float | None, initial_gain: float | None
     ) -> None:
         exposure_min, exposure_max = self._camera.exposure_time_range_us()
+        # Bounded by the frame-rate budget, not the sensor's own maximum:
+        # anything past it costs frame rate and adds motion blur to exactly
+        # the movement students are here to watch. A slider that cannot
+        # reach a bad value beats a warning about one that was saved.
+        if self._target_fps:
+            exposure_max = min(exposure_max, exposure_budget_us(self._target_fps))
         gain_min, gain_max = self._camera.gain_range()
 
         # Seed from a previously-saved calibration if there is one, rather

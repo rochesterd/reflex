@@ -850,6 +850,26 @@ class CalibrationCostReportingTest(unittest.TestCase):
 
 
 class PreviewDialogCalibrationTest(unittest.TestCase):
+    def test_the_exposure_slider_cannot_exceed_the_frame_rate_budget(self):
+        """A slider that cannot reach a bad value beats a warning about one
+        that was saved. A 124ms calibration reached the field and capped that
+        camera at 8fps -- see DECISIONS.md 2026-09-13."""
+        from settings import PreviewDialog
+
+        class _WideRangeCamera(_FakeCalibratableCamera):
+            """Like the real Keeler, whose sensor allows 2 seconds."""
+
+            def exposure_time_range_us(self):
+                return (24.0, 2_000_000.0)
+
+        camera = _WideRangeCamera()
+        dialog = PreviewDialog(camera, "BIO", target_fps=30)
+        try:
+            self.assertGreater(camera.exposure_time_range_us()[1], 30_000)
+            self.assertLessEqual(dialog.exposure_slider.maximum(), 30_000)
+        finally:
+            dialog._shutdown()
+
     def test_calibratable_camera_shows_sliders_seeded_from_its_current_values(self):
         from settings import PreviewDialog
 
