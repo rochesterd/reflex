@@ -9,81 +9,88 @@ deletes it from here; for plans already built, see DECISIONS.md's
 
 ## 2026-08-18 — Other camera/recording settings surveyed, not acted on (yet)
 
-Surfaced alongside the UVC autofocus/auto-exposure lock (see DECISIONS.md);
-recorded so it isn't re-derived later, not committed work.
+Recorded so they aren't re-derived; neither is committed work.
 
-- **Recording quality (`codec`/`crf`/`preset`)** is hardcoded in
-  `Recorder`'s defaults (`libx264`, `crf=23`), never wired to
-  `config.json` — the category `fps` was in before it moved, and a real
-  quality-vs-disk tradeoff that could differ by an institution's storage
-  budget. Move it to the `recording` section if a real need shows up.
-- **`MAX_SESSION_MINUTES`, `DEFAULT_STALL_TIMEOUT_S`,
-  `REQUIRED_SPACE_MULTIPLIER`** (`kiosk.py`) are constructor parameters
-  with measured defaults, deliberately not config: nobody has needed a
-  different value, and config for a hypothetical isn't earned.
+- **Recording quality** (`libx264`, `crf=23`) is hardcoded in `Recorder`'s
+  defaults — a real quality-vs-disk tradeoff that could differ per
+  institution. Move it to `config.json`'s `recording` section if a need
+  shows up.
+- **`kiosk.py`'s constants** (session length, stall timeout, space
+  multiplier) are constructor parameters with measured defaults,
+  deliberately not config: config for a hypothetical isn't earned.
 
 ---
 
 ## 2026-08-26 — Health-check tool surveyed, not acted on (yet)
 
-A technician-facing "Doctor": one glanceable green/yellow/red report
-consolidating diagnostics that exist but are scattered and reactive — the
-SDK version check buried in `packaging/reflex.iss` (install-time only),
-`config.py`'s validation (only when `app.exe` launches), `settings.py`'s
-"not connected" detection (only if a technician opens it), `kiosk.py`'s
-disk preflight (only just before Start).
+A technician-facing "Doctor": one green/yellow/red report gathering
+diagnostics that exist but are scattered and reactive — the installer's SDK
+check, `config.py`'s validation, `settings.py`'s "not connected", and
+`kiosk.py`'s disk preflight, each of which only speaks when its own moment
+arrives.
 
 **Shelved** — possibly overboard at this scale; revisit if
-diagnostic-hunting becomes a real recurring problem, not preemptively. If
-built it stays diagnosis-only (no silent auto-fix), per CLAUDE.md's "loud
-and early" — the one plausible exception being a technician-clicked
-"re-run the IDS peak install", which only re-exposes what
-`InstallIdsPeakSilently()` already does once, safely.
+diagnostic-hunting becomes a recurring problem. If built it stays
+diagnosis-only, per CLAUDE.md's "loud and early".
 
 ---
 
-## 2026-09-13 — Recordings are PII, and they pool on a shared machine
+## 2026-09-13 — Where recordings should live
 
-Raised while answering the second feedback round's audio question, and it
-turned out to be the larger issue. **Every recording already contains
-identifiable images of two students** — the one performing the skill and the
-peer acting as patient. An eye and a face are PII; a nickname does not
-change that, which is why the "optional identifier" plan is folded into
-this entry rather than kept separately.
+**Every recording contains two students** — the one performing and the peer
+being examined. An eye and a face are PII, so a nickname solves nothing;
+the optional-identifier plan is folded in here. The kiosk no longer lists
+past sessions (DECISIONS 2026-09-13), which removed cross-student browsing
+but not the problem: sessions still pool on a shared machine.
 
-**The exposure that exists today, before any new feature.** Sessions are
-written to one folder on the kiosk (`%PUBLIC%\Documents\Reflex\sessions`),
-and **Watch Past Recordings lists all of them to whoever is standing
-there**. Any student can watch any other student's session. Nothing in the
-app scopes a recording to the person who made it.
+### The question that picks the mechanism
 
-**Direction, from the developer 2026-09-13:** stop pooling recordings in a
-local folder; have each student take their own away — a personal flash
-drive is the current thinking. The workflow questions are real and
-unanswered: what happens when the drive is absent or full mid-session, who
-owns the `sessions_dir` default, whether anything may remain on the kiosk
-between sessions, and what the app should do about recordings already
-sitting there.
+Not local-versus-USB. **Who may hold a recording of another student, and
+under what conditions?** NECO answers that; the answer picks the
+destination — the student's own drive, or a NECO system. Both need the same
+engineering. **Flash drives do not remove the PII problem, they distribute
+it:** handing a student the file discloses their peer's image to them and
+takes it outside any retention, deletion or breach process.
 
-**What must not be built before that is settled:** audio (it adds voices to
-data we cannot yet place correctly), and any identifier feature (it makes
-recordings more findable while the storage question is open). Neither is a
-technical blocker; both would deepen a problem we have not solved.
+### Intended destination: Panopto (to confirm with IT)
 
-**Worth considering as immediate mitigations,** each small and independent:
+Institutional systems solve the governance half — access control,
+retention, audit, an owner. Panopto looks the closer fit: it is built for
+*multiple simultaneous feeds*, which is what a session is, and assignment
+folders give each student a space only they and instructors see. Canvas
+would likely mean one composited file (`session_export` can render it),
+losing the layout picker and independent angles.
 
-- Disable or remove **Watch Past Recordings**, leaving Watch Last Recording
-  for the session a student just made. One flag; removes the cross-student
-  browsing entirely.
-- Make `sessions_dir` a removable drive, and refuse to start when it is
-  absent — the disk preflight already has the shape for this.
-- Retention: today's opt-in cleanup is a blunt instrument for this, but a
-  "clear the kiosk between students" pass is the same machinery.
+**Blocking questions for IT, none of them technical for us:**
 
-The full analysis the developer describes — everything this app can capture,
-and how each piece must be handled — belongs in its own DECISIONS entry
-once NECO's requirements are known. This entry is the placeholder, and the
-statement that the app is not currently built for the answer.
+1. Does NECO have Panopto, and does it cover this use?
+2. Can a kiosk get an API credential, and is a service account acceptable?
+3. What does the assignment-folder permission model actually allow?
+4. What is the storage quota, against ~750 MB per 15-minute session?
+
+A service account is simplest but lands every recording under one identity,
+which brings the identifier question straight back. Per-student login at
+the kiosk attributes correctly and is heavier for an unsupervised student.
+
+### The engineering, which is the same either way
+
+**Record locally, hand off, verify, delete.** Recording straight to a
+removable drive makes an irreplaceable capture depend on a cheap device
+that can be pulled mid-session or be too slow — the thing CLAUDE.md
+forbids. Capture to local disk as now, copy to the destination, verify the
+copy (the recorder already verifies its own MP4s), then delete the local
+one. Keep the destination pluggable: a drive and an upload are the same
+operation with a different target.
+
+**The failure cases are the design**, all student-facing: no drive or
+network, destination full, drive pulled mid-copy, student walks away. A
+session must never be silently stranded — hold un-handed-off sessions and
+say so on the next start.
+
+**Still not to be built until this settles:** audio, and any identifier
+feature. **Worth doing now, prejudging nothing:** turn on retention for the
+clinic machine — it exists, opt-in, and today a session sits there
+indefinitely. Config, not code.
 
 ---
 
@@ -113,12 +120,6 @@ keep the numbers in the DECISIONS entry.
   tone curve that would rescue its shadows, on board, for no bandwidth and
   no host CPU. Gamma first because it is one number; the LUT only if one
   exponent proves too blunt.
-- **Legacy BIO picture registers.** Confirm what each of `R20`-`R25` does
-  before changing any: we inherit five values from a vendor capture and
-  have checked none. Then own them in a profile rather than replaying
-  constants. While the camera is attached, also re-derive the START/STOP
-  split — those four writes are picture registers and cannot stop a bridge,
-  so something else did.
 - **Hands camera exposure.** Today the two-second warmup's result is frozen,
   so every session starts from whatever the room looked like. Have
   `settings.py` record the converged value at calibration time and
