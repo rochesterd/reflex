@@ -89,6 +89,11 @@ class InstrumentConfig:
     # `label` is what students read on the picker: pre-filled from the
     # profile in settings.py, then whatever the technician made it.
     profile: str | None = None
+    # Overrides the profile's black level for this room. Rarely needed: the
+    # right value is a property of the sensor, not the room. Present because
+    # a camera swapped for a different revision is the case that would need
+    # it, and a technician cannot wait for a release.
+    black_level: float | None = None
     # A technician's one-time calibration for this instrument, written by
     # settings.py's Preview dialog -- see ids_camera.py's
     # supports_manual_calibration() and DECISIONS.md's 2026-08-25
@@ -280,7 +285,7 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
         # "ids" entry and only changing "kind" fails fast instead of
         # producing a config.json that looks configured but isn't.
         unexpected = {
-            "serial", "exposure_time_us", "gain", "orientation", "pixel_clock_hz"
+            "serial", "exposure_time_us", "gain", "black_level", "orientation", "pixel_clock_hz"
         } & entry.keys()
         if unexpected:
             raise ConfigError(
@@ -296,6 +301,7 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
     exposure_time_us = _parse_optional_positive_number(path, f"instruments.{key}.exposure_time_us", entry.get("exposure_time_us"))
     gain = _parse_optional_positive_number(path, f"instruments.{key}.gain", entry.get("gain"))
 
+    black_level = _parse_optional_positive_number(path, f"instruments.{key}.black_level", entry.get("black_level"))
     orientation = _parse_optional_orientation(path, f"instruments.{key}.orientation", entry.get("orientation"))
     pixel_clock_hz = entry.get("pixel_clock_hz")
     if pixel_clock_hz is not None:
@@ -306,6 +312,7 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
         serial=serial,
         label=label,
         profile=profile,
+        black_level=black_level,
         exposure_time_us=exposure_time_us,
         gain=gain,
         orientation=orientation,

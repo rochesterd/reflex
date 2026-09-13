@@ -454,41 +454,51 @@ class TestPresetPrecedence(unittest.TestCase):
         base.update(kwargs)
         return InstrumentConfig(**base)
 
-    def test_a_profile_supplies_its_orientation_and_pixel_clock(self):
-        orientation, pixel_clock = app._resolve_presets(
+    def test_a_profile_supplies_its_presets(self):
+        orientation, pixel_clock, black_level = app._resolve_presets(
             self._inst(profile="haag_streit_bi900_slit_lamp"), "slit_lamp"
         )
         self.assertEqual(orientation, ORIENTATION_ROTATE_180)
         self.assertEqual(pixel_clock, 80_000_000)
+        # The factory value of 90 clips this sensor; see DECISIONS 2026-09-13.
+        self.assertEqual(black_level, 110.0)
 
     def test_an_explicit_config_value_beats_the_profile(self):
-        orientation, pixel_clock = app._resolve_presets(
+        orientation, pixel_clock, black_level = app._resolve_presets(
             self._inst(
                 profile="haag_streit_bi900_slit_lamp",
                 orientation=ORIENTATION_NONE,
                 pixel_clock_hz=60_000_000,
+                black_level=95.0,
             ),
             "slit_lamp",
         )
         self.assertEqual(orientation, ORIENTATION_NONE)
         self.assertEqual(pixel_clock, 60_000_000)
+        self.assertEqual(black_level, 95.0)
 
     def test_no_profile_leaves_both_to_the_camera(self):
         """Custom, or a config written before profiles existed. None means
         IdsCamera matches the model string itself."""
-        self.assertEqual(app._resolve_presets(self._inst(), "slit_lamp"), (None, None))
+        self.assertEqual(app._resolve_presets(self._inst(), "slit_lamp"), (None, None, None))
 
     def test_custom_is_not_an_unknown_profile(self):
         with self.assertNoLogs("app", level="WARNING"):
-            orientation, pixel_clock = app._resolve_presets(
-                self._inst(profile=CUSTOM_PROFILE_ID), "slit_lamp"
-            )
-        self.assertEqual((orientation, pixel_clock), (None, None))
+            presets = app._resolve_presets(self._inst(profile=CUSTOM_PROFILE_ID), "slit_lamp")
+        self.assertEqual(presets, (None, None, None))
+
+    def test_a_self_managing_camera_is_left_alone(self):
+        """The Keeler adjusts its black level continuously and does not clip;
+        writing one would be taking over a job it does correctly."""
+        _, _, black_level = app._resolve_presets(
+            self._inst(profile="keeler_vantage_plus_digital"), "bio"
+        )
+        self.assertIsNone(black_level)
 
     def test_an_unknown_profile_warns_and_falls_back(self):
         with self.assertLogs("app", level="WARNING") as logs:
             result = app._resolve_presets(self._inst(profile="from_a_newer_build"), "slit_lamp")
-        self.assertEqual(result, (None, None))
+        self.assertEqual(result, (None, None, None))
         self.assertIn("from_a_newer_build", "".join(logs.output))
 
 

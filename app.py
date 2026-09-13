@@ -564,8 +564,9 @@ class KioskWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def _resolve_presets(inst: InstrumentConfig, name: str) -> tuple[str | None, int | None]:
-    """(orientation, pixel_clock_hz) for an IDS camera, most specific first:
+def _resolve_presets(inst: InstrumentConfig, name: str) -> tuple[str | None, int | None, float | None]:
+    """(orientation, pixel_clock_hz, black_level) for an IDS camera, most
+    specific first:
 
     1. an explicit `config.json` value -- the escape hatch for a
        non-standard mounting, or a host that can't take the full clock;
@@ -586,7 +587,10 @@ def _resolve_presets(inst: InstrumentConfig, name: str) -> tuple[str | None, int
         )
     orientation = inst.orientation or (profile.orientation if profile is not None else None)
     pixel_clock_hz = inst.pixel_clock_hz or (profile.pixel_clock_hz if profile is not None else None)
-    return orientation, pixel_clock_hz
+    black_level = inst.black_level
+    if black_level is None and profile is not None:
+        black_level = profile.black_level
+    return orientation, pixel_clock_hz, black_level
 
 
 def _make_camera(
@@ -619,7 +623,7 @@ def _make_camera(
     # break `python app.py --synthetic` on such a machine.
     from ids_camera import IdsCamera
 
-    orientation, pixel_clock_hz = _resolve_presets(inst, name)
+    orientation, pixel_clock_hz, black_level = _resolve_presets(inst, name)
     return IdsCamera(
         serial=inst.serial,
         exposure_time_us=inst.exposure_time_us,
@@ -627,6 +631,7 @@ def _make_camera(
         target_fps=target_fps,
         orientation=orientation,
         pixel_clock_hz=pixel_clock_hz,
+        black_level=black_level,
     )
 
 

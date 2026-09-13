@@ -77,11 +77,6 @@ Each is a value the hardware already has and Reflex has never written.
 Measure the frame before and after (median, clipped fraction, p99.9) and
 keep the numbers in the DECISIONS entry.
 
-- **Slit lamp black level.** The only one actively destroying data: at the
-  camera's default of 90, 30% of every frame is pinned to exactly 0. Find
-  the value that clips nothing without lifting the beam's black surround
-  into grey, then make it a profile field applied in `_open()` — after the
-  pixel clock, before `TLParamsLocked`.
 - **Digital BIO gamma, then its lookup table.** The camera can apply the
   tone curve that would rescue its shadows, on board, for no bandwidth and
   no host CPU. Gamma first because it is one number; the LUT only if one

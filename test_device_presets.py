@@ -10,6 +10,7 @@ from camera import ORIENTATION_FLIP_VERTICAL, ORIENTATION_NONE, ORIENTATION_ROTA
 from device_presets import (
     CUSTOM_PROFILE_ID,
     PROFILES,
+    black_level_for_model,
     orientation_for_model,
     pixel_clock_hz_for_model,
     profile_for_id,
@@ -133,6 +134,29 @@ class ProfileRegistryTest(unittest.TestCase):
                 with self.subTest(token=token):
                     self.assertEqual(orientation_for_model(token), profile.orientation)
                     self.assertEqual(pixel_clock_hz_for_model(token), profile.pixel_clock_hz)
+
+class BlackLevelForModelTest(unittest.TestCase):
+    """The slit lamp's factory black level clips; the Keeler manages its own.
+    See DECISIONS.md's 2026-09-13 entry for the measurements."""
+
+    def test_the_slit_lamp_gets_a_corrected_floor(self):
+        self.assertEqual(black_level_for_model("UI325xCP-C"), 110.0)
+
+    def test_the_keeler_is_left_alone(self):
+        """It self-adjusts continuously and does not clip -- writing a value
+        would be taking over a job it does correctly."""
+        self.assertIsNone(black_level_for_model("U3-327xCP-C"))
+
+    def test_an_unknown_model_is_left_alone(self):
+        self.assertIsNone(black_level_for_model("SomeOtherCamera"))
+        self.assertIsNone(black_level_for_model(None))
+
+    def test_it_matches_the_profile_it_came_from(self):
+        profile = next(p for p in PROFILES if p.id == "haag_streit_bi900_slit_lamp")
+        for token in profile.model_tokens:
+            with self.subTest(token=token):
+                self.assertEqual(black_level_for_model(token), profile.black_level)
+
 
 if __name__ == "__main__":
     unittest.main()

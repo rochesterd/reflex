@@ -4754,3 +4754,34 @@ curve above. Kept deliberately rather than by neglect, unlike the manual
 white-balance path deleted two days ago: that one could never run on this
 hardware, while these two have measurements behind them and named uses
 ahead. If neither is adopted, they should go the same way.
+
+---
+
+## 2026-09-13 - The slit lamp's black level is ours now
+
+**Adopted 110**, from the same day's measurements: the factory 90 sits on
+this sensor's clipping point and pins 12-60% of a properly exposed frame to
+zero, while 110 clips nothing, leaves the floor at 6-7 of 255, and is
+indistinguishable from 90 by eye. Verified end to end on the camera -- it
+reads back 110, and the frame's crushed fraction goes from 12% to 0.0%.
+
+**It resolves from the model string, not only from a profile.** The first
+implementation took it from `DeviceProfile` alone, which quietly meant no
+existing install would get it: every `config.json` written before profiles
+has none, so the camera would have kept its clipping default until someone
+re-saved in Settings. `black_level_for_model()` now mirrors
+`orientation_for_model()` -- a config value wins, then the profile, then the
+model's own preset -- so the fix reaches a clinic machine on its next start
+with nothing for a technician to do.
+
+**The Keeler deliberately gets nothing.** It adjusts its black level
+continuously and does not clip; writing one would be taking over a job it
+already does correctly. `black_level=None` on that profile is a decision,
+and a test says so by name.
+
+**Why a preset rather than a technician setting:** the value is a property
+of the sensor, not the room -- and gain only ever moves it away from the
+clipping point, so one number chosen at gain 1.0, the worst case, is safe
+for every calibration above it. `config.json` keeps a `black_level`
+override for the case that would actually need one: a camera swapped for a
+different revision, where a technician cannot wait for a release.

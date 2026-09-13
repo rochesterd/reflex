@@ -85,7 +85,7 @@ from ids_peak import ids_peak
 from ids_peak_ipl import ids_peak_ipl
 
 from camera import BaseCamera
-from device_presets import orientation_for_model, pixel_clock_hz_for_model
+from device_presets import black_level_for_model, orientation_for_model, pixel_clock_hz_for_model
 from exposure_calibration import (
     DEFAULT_MAX_ITERATIONS,
     METERING_HIGHLIGHT,
@@ -186,6 +186,7 @@ class IdsCamera(BaseCamera):
         target_fps: float | None = None,
         orientation: str | None = None,
         pixel_clock_hz: int | None = None,
+        black_level: float | None = None,
         binning: int | None = None,
         pixel_format: str | None = None,
         converge_auto: bool = True,
@@ -207,6 +208,7 @@ class IdsCamera(BaseCamera):
         # 1/N^2 the pixels. Like the pixel clock, it does NOT persist across
         # opens on the uEye transport layer, so it is set here every time --
         # and before Width/Height are read, since it changes them.
+        self._black_level = black_level
         self._binning = binning
         # None keeps whatever the camera powers up in (BayerRG8 on both of
         # ours). Set before buffers are announced, since payload size
@@ -270,6 +272,7 @@ class IdsCamera(BaseCamera):
             # sets the frame period, and ExposureTime's own maximum is
             # derived from it.
             self._apply_pixel_clock()
+            self._apply_black_level()
             self._apply_binning()
             self._apply_pixel_format()
 
@@ -516,6 +519,31 @@ class IdsCamera(BaseCamera):
     def gain_range(self) -> tuple[float, float]:
         node = self._node_map.FindNode("Gain")
         return float(node.Minimum()), float(node.Maximum())
+
+    def _apply_black_level(self) -> None:
+        """Set the sensor's black floor, when a profile or config names one.
+
+        Best-effort like the other optional nodes. Clamped to the node's own
+        range, which is not a common scale: the slit lamp counts 0-255 while
+        the Keeler counts 0-31.94, so a value is only meaningful against the
+        camera it was measured on.
+        """
+        # None means "ask the device-model preset", the same escape route
+        # orientation takes -- so a config written before profiles existed
+        # still gets the fix, without a technician re-saving anything.
+        wanted = self._black_level
+        if wanted is None:
+            wanted = black_level_for_model(self._model_name)
+        if wanted is None:
+            return
+        node = self._node_map.TryFindNode("BlackLevel")
+        if node is None or not node.IsWriteable():
+            logger.info("%s: black level not writable; leaving it alone", self.label)
+            return
+        previous = float(node.Value())
+        value = min(float(node.Maximum()), max(float(node.Minimum()), wanted))
+        node.SetValue(value)
+        logger.info("%s: black level %.0f (camera default %.0f)", self.label, value, previous)
 
     def _apply_pixel_format(self) -> None:
         """Best-effort, like the other optional nodes: a camera that doesn't

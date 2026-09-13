@@ -66,6 +66,11 @@ class DeviceProfile:
     model_tokens: tuple[str, ...] = ()
     orientation: str = ORIENTATION_NONE
     pixel_clock_hz: int | None = None
+    # The sensor's black floor. None leaves the camera's own value alone,
+    # which is right for a camera that manages it (the Keeler self-adjusts
+    # continuously) and wrong for one whose factory value clips -- see the
+    # slit lamp below and DECISIONS.md's 2026-09-13 black-level entry.
+    black_level: float | None = None
     # One line for the technician, shown under the profile in settings.py.
     note: str = ""
 
@@ -97,6 +102,15 @@ PROFILES: tuple[DeviceProfile, ...] = (
         # the maximum exposure in proportion: light traded for frame rate,
         # not a free win. See DECISIONS.md's 2026-09-08 pixel-clock entry.
         pixel_clock_hz=80_000_000,
+        # The factory value of 90 sits exactly on this sensor's clipping
+        # point: at a scene-appropriate exposure it pins 12-60% of the frame
+        # to zero, destroying the shadow end before any software sees it.
+        # Measured 2026-09-13 against a beam on a black focus rod: the crush
+        # stops between 90 and 95, and at 110 nothing clips while the floor
+        # sits at 6-7 of 255 -- indistinguishable from 90 by eye, with the
+        # beam unchanged. Gain only ever helps (the offset scales with it),
+        # so a value chosen at gain 1.0, the worst case, is safe above it.
+        black_level=110.0,
         note="No auto-exposure of its own: calibrate it in Preview before first use.",
     ),
     DeviceProfile(
@@ -160,6 +174,15 @@ def pixel_clock_hz_for_model(model_name: str | None) -> int | None:
     """Pixel clock this model should run at, or None to leave it alone."""
     profile = profile_for_model(model_name)
     return profile.pixel_clock_hz if profile is not None else None
+
+
+def black_level_for_model(model_name: str | None) -> float | None:
+    """The black floor this model needs, or None to leave the camera's own
+    alone. Same shape as orientation_for_model(): it exists so a camera gets
+    its preset from the model string when `config.json` names no profile --
+    which is every configuration written before profiles existed."""
+    profile = profile_for_model(model_name)
+    return profile.black_level if profile is not None else None
 
 
 def orientation_for_model(model_name: str | None) -> str:
