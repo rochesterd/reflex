@@ -71,17 +71,6 @@ override only where the answer is genuinely per-room. Nothing here may gate
 Start: every one of these is visible in the live preview, and the
 technician's test recording is the backstop.
 
-### Phase 0 — probe, because five of these are guesses
-
-Run `tools/probe_camera_features.py` against both IDS cameras. It has never
-executed, so expect to fix it first. It answers region of interest and
-binning (a bigger bandwidth lever than any format change, and possibly
-enough to make higher bit depth free), `DeviceLinkThroughputLimit`,
-hardware `ReverseX`/`ReverseY` (which would make the per-frame rotation
-Reflex does today free), and whether `Gamma` survives `TLParamsLocked`.
-Fold the answers into `IMAGING.md`; that file's "Not yet known" section is
-the definition of done.
-
 ### Phase 1 — the free writes, one at a time
 
 Each is a value the hardware already has and Reflex has never written.
@@ -112,11 +101,17 @@ keep the numbers in the DECISIONS entry.
 ### Phase 2 — only if Phase 1 is not enough
 
 Higher bit depth plus a tone curve, and only for a camera that cannot curve
-for itself, which today means the slit lamp alone. `ids_peak_ipl` supplies
-`GammaCorrector` (with `SetDigitalBlack`), so the pieces are vendor code
-rather than hand-rolled maths. Costs roughly 2x the USB bandwidth and
-per-frame CPU, both of which need measuring on the clinic machine, not this
-laptop. If Phase 1 recovers the shadows, write that down and stop here.
+for itself -- which now means the slit lamp alone, since the Keeler's own
+gamma does the job on board. Phase 0 measured the cost: both cameras hold
+30fps at 12-bit with nothing dropped, for 2x the bandwidth and about 15
+more points of one core.
+
+**The part that is not optional:** `_grab()` converts to BGR8 the moment a
+buffer arrives, so capturing 12-bit and changing nothing else delivers the
+same 248 levels as 8-bit -- measured, not predicted. The curve has to be
+applied *in* that conversion, with `ids_peak_ipl`'s `GammaCorrector` (it
+has `SetDigitalBlack` too), or the extra depth is thrown away a line later.
+If Phase 1 recovers the shadows, write that down and stop here.
 
 **Stop conditions worth stating up front:** a measurement that shows no
 improvement ends that step, and the DECISIONS entry records the numbers

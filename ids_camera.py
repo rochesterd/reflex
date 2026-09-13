@@ -187,6 +187,7 @@ class IdsCamera(BaseCamera):
         orientation: str | None = None,
         pixel_clock_hz: int | None = None,
         binning: int | None = None,
+        pixel_format: str | None = None,
         converge_auto: bool = True,
     ):
         super().__init__(queue_size=queue_size, label=serial, orientation=orientation)
@@ -207,6 +208,11 @@ class IdsCamera(BaseCamera):
         # opens on the uEye transport layer, so it is set here every time --
         # and before Width/Height are read, since it changes them.
         self._binning = binning
+        # None keeps whatever the camera powers up in (BayerRG8 on both of
+        # ours). Set before buffers are announced, since payload size
+        # depends on it. _grab() reads each buffer's own format, so a
+        # higher-depth capture still reaches consumers as BGR8.
+        self._pixel_format = pixel_format
         # Per-instrument calibrated values from config.json (InstrumentConfig's
         # optional exposure_time_us/gain fields) -- see DECISIONS.md's
         # 2026-08-25 calibration entry. None means "let _converge_auto_nodes()
@@ -265,6 +271,7 @@ class IdsCamera(BaseCamera):
             # derived from it.
             self._apply_pixel_clock()
             self._apply_binning()
+            self._apply_pixel_format()
 
             self._width = int(self._node_map.FindNode("Width").Value())
             self._height = int(self._node_map.FindNode("Height").Value())
@@ -509,6 +516,26 @@ class IdsCamera(BaseCamera):
     def gain_range(self) -> tuple[float, float]:
         node = self._node_map.FindNode("Gain")
         return float(node.Minimum()), float(node.Maximum())
+
+    def _apply_pixel_format(self) -> None:
+        """Best-effort, like the other optional nodes: a camera that doesn't
+        offer the requested format keeps its current one rather than failing
+        to open."""
+        if not self._pixel_format:
+            return
+        node = self._node_map.TryFindNode("PixelFormat")
+        if node is None or not node.IsWriteable():
+            logger.info("%s: pixel format not writable; keeping the current one", self.label)
+            return
+        available = {e.SymbolicValue() for e in node.AvailableEntries()}
+        if self._pixel_format not in available:
+            logger.warning(
+                "%s: pixel format %r not offered by this camera; keeping %s",
+                self.label, self._pixel_format, node.CurrentEntry().SymbolicValue(),
+            )
+            return
+        node.SetCurrentEntry(self._pixel_format)
+        logger.info("%s: pixel format %s", self.label, self._pixel_format)
 
     def _apply_binning(self) -> None:
         """Best-effort, like every optional node here: a camera without

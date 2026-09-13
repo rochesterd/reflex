@@ -4721,3 +4721,36 @@ applies them after the bring-up sequence and takes a `picture=` override.
 Adopting the vendor's numbers deliberately is the outcome the ROADMAP entry
 said to expect: someone chose them with the instrument in front of them.
 What changed is that we now know what each one does, and can move them.
+
+---
+
+## 2026-09-13 - Bit depth is free in frame rate, and inert on its own
+
+The last of Phase 0's unknowns, measured with both cameras at a 30fps
+target:
+
+| | 8-bit | 10-bit | 12-bit |
+|---|---|---|---|
+| slit lamp | 30.1fps, 58 MB/s, 45% core | 30.1fps, 116 MB/s | 30.1fps, 116 MB/s, 60% core |
+| Keeler | 30.1fps, 95 MB/s, 41% core | 30.1fps packed, 118 MB/s | 30.1fps packed 142 / unpacked 190 MB/s, ~60% core |
+
+Zero dropped frames in every run, counted from each camera's own FrameID.
+So depth costs bandwidth and about fifteen points of one core -- not frame
+rate, which is what the bandwidth arithmetic in IMAGING.md had left open.
+
+**And on its own it does nothing.** A `BayerRG12` capture reaches consumers
+as the same `uint8` BGR8 frame with the same 248 distinct levels as
+`BayerRG8`, because `_grab()` converts every buffer immediately. The extra
+bits exist for the length of one function call. Any value from higher depth
+has to come from tone-mapping *inside* that conversion; switching the
+format alone is a bandwidth increase and nothing else. This is worth
+knowing before someone "enables 12-bit" and reports no improvement.
+
+**Two parameters stay on `IdsCamera` with no caller yet:** `binning` and
+`pixel_format`. Both were added as the apparatus that answered Phase 0, and
+both are the mechanism the remaining phases would use -- binning for a room
+too dim to reach 30fps, where it beats gain, and pixel_format for the tone
+curve above. Kept deliberately rather than by neglect, unlike the manual
+white-balance path deleted two days ago: that one could never run on this
+hardware, while these two have measurements behind them and named uses
+ahead. If neither is adopted, they should go the same way.

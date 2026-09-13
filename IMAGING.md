@@ -91,5 +91,12 @@ Answers to what this section used to list as unknown. See DECISIONS.md's
 - **Host CPU:** 54% of one core for the slit lamp at 38fps free-running,
   28% for the Keeler at 20fps, capture only.
 
-Still unmeasured: sustained frame rate at 10- and 12-bit, which needs a
-pixel-format parameter `IdsCamera` does not have.
+- **Bit depth costs no frame rate.** Both cameras hold 30fps with zero
+  dropped frames at every depth they offer, up to the Keeler's unpacked
+  12-bit at 190 MB/s. The cost is host CPU: roughly 45% of one core at
+  8-bit, 60% at 12-bit, for the debayer.
+- **But switching pixel format alone changes nothing downstream.**
+  `_grab()` converts each buffer to BGR8 immediately, so a 12-bit capture
+  arrives with the same 248 distinct levels as an 8-bit one. The extra bits
+  are only worth anything if a tone curve is applied *during* that
+  conversion -- see ROADMAP's Phase 2.
