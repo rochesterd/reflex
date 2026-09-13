@@ -94,11 +94,22 @@ LOG_FILE = LOG_DIR / "app.log"
 
 THIRD_PERSON_LABEL = "third-person camera"
 
-# What the brightness steps are called, one per slider stop. A student
-# picks a picture, not a
-# gamma value -- and the words have to mean something with the instrument
-# at their eye, not on a spec sheet.
-BRIGHTNESS_STEP_NAMES = ("Normal", "Brighter", "Brightest")
+# The brightness slider's travel, in slider units. 100 makes the readout a
+# percentage for free, and is finer than a thumb can resolve.
+BRIGHTNESS_SLIDER_RANGE = 100
+# The ends are named rather than numbered, because those two positions
+# *mean* something a student can act on: the technician's calibration, and
+# the most this model was measured to give. Everything between is a
+# percentage -- with a continuous control there is nothing else honest to
+# call it.
+BRIGHTNESS_MIN_NAME = "Normal"
+BRIGHTNESS_MAX_NAME = "Brightest"
+# How often a drag is allowed to reach the camera. Every write is a
+# GenICam node write or a USB control transfer, on a stream that may be
+# recording; a drag fires far faster than that. The first move applies
+# immediately and the last always applies, so what the student ends on is
+# always what the camera gets -- this only thins out the middle.
+BRIGHTNESS_WRITE_MS = 100
 
 
 def _format_clock(seconds: float) -> str:
@@ -263,23 +274,25 @@ class KioskWindow(QMainWindow):
         self.brightness_label.setObjectName(reflex_style.SECONDARY)
         self.brightness_slider = QSlider(Qt.Orientation.Horizontal)
         self.brightness_slider.setMinimum(0)
-        self.brightness_slider.setMaximum(len(BRIGHTNESS_STEP_NAMES) - 1)
-        # One stop per press, either by click or by arrow key -- a control
-        # with three positions should never need a precise drag.
-        self.brightness_slider.setSingleStep(1)
-        self.brightness_slider.setPageStep(1)
+        self.brightness_slider.setMaximum(BRIGHTNESS_SLIDER_RANGE)
+        # Arrow keys nudge, clicking the groove moves a visible amount.
+        self.brightness_slider.setSingleStep(2)
+        self.brightness_slider.setPageStep(10)
         self.brightness_slider.setObjectName(reflex_style.TOUCH_SLIDER)
         self.brightness_slider.setMinimumHeight(40)
-        # Narrow on purpose. Stretched across the window, three stops read
-        # as a continuous fine adjustment and leave big dead zones between
-        # them; at this width the steps are obvious. Qt's tick marks are
-        # not an option -- a stylesheet on a slider replaces the whole
-        # subcontrol drawing, so TicksBelow renders nothing.
-        self.brightness_slider.setFixedWidth(220)
+        # Wide enough that the travel is worth having, narrow enough that
+        # it still reads as one control rather than a scrub bar.
+        self.brightness_slider.setFixedWidth(320)
         self.brightness_slider.valueChanged.connect(self._on_brightness_changed)
-        # Fixed width, so the row doesn't shuffle as the word changes.
-        self.brightness_value_label = QLabel(BRIGHTNESS_STEP_NAMES[0])
+        # Fixed width, so the row doesn't shuffle as the text changes.
+        self.brightness_value_label = QLabel(BRIGHTNESS_MIN_NAME)
         self.brightness_value_label.setMinimumWidth(70)
+
+        # Coalesces a drag into at most one camera write per interval.
+        self.brightness_timer = QTimer(self)
+        self.brightness_timer.setInterval(BRIGHTNESS_WRITE_MS)
+        self.brightness_timer.timeout.connect(self._flush_brightness)
+        self._pending_brightness: float | None = None
 
         # Centred as one group rather than spread across the window, so
         # the caption, the handle and the word read as a single control.
@@ -381,18 +394,39 @@ class KioskWindow(QMainWindow):
         self._try_select_instrument()
         self._sync_ui()
 
-    def _on_brightness_changed(self, level: int) -> None:
-        self.controller.set_brightness_level(level)
-        self.brightness_value_label.setText(self._brightness_name(level))
+    def _on_brightness_changed(self, position: int) -> None:
+        """A drag, a click or an arrow key. The label follows immediately;
+        the camera write is throttled (see BRIGHTNESS_WRITE_MS)."""
+        amount = position / BRIGHTNESS_SLIDER_RANGE
+        self.brightness_value_label.setText(self._brightness_text(amount))
+        self._pending_brightness = amount
+        if not self.brightness_timer.isActive():
+            # Leading edge: the first move of a drag is never delayed, so
+            # the picture responds the instant they touch it.
+            self._flush_brightness()
+            self.brightness_timer.start()
+
+    def _flush_brightness(self) -> None:
+        """Write whatever the slider last settled on, at most once per
+        interval. Stops the timer once a drag has stopped producing values,
+        having applied the final one -- the resting position must always be
+        what the camera ends up with."""
+        if self._pending_brightness is None:
+            self.brightness_timer.stop()
+            return
+        amount, self._pending_brightness = self._pending_brightness, None
+        self.controller.set_brightness(amount)
 
     @staticmethod
-    def _brightness_name(level: int) -> str:
-        """The word for a step. Falls back to a number for a camera that
-        offers more steps than there are names, so a new camera can't make
-        the control unlabelled."""
-        if 0 <= level < len(BRIGHTNESS_STEP_NAMES):
-            return BRIGHTNESS_STEP_NAMES[level]
-        return f"Level {level + 1}"
+    def _brightness_text(amount: float) -> str:
+        """Words at the ends, a percentage in between -- see
+        BRIGHTNESS_MIN_NAME."""
+        percent = round(amount * 100)
+        if percent == 0:
+            return BRIGHTNESS_MIN_NAME
+        if percent == 100:
+            return BRIGHTNESS_MAX_NAME
+        return f"{percent}%"
 
     def _on_start_clicked(self) -> None:
         if self.controller.state != State.READY:
@@ -507,26 +541,24 @@ class KioskWindow(QMainWindow):
     def _sync_ui(self, preflight: PreflightStatus | None = None) -> None:
         state = self.controller.state
         self.mark.set_recording(state == State.RECORDING)
-        # A camera with one step has nothing to offer, so the control
-        # goes rather than sitting there inert.
-        steps = self.controller.brightness_levels()
-        adjustable = steps > 1
+        # A camera with nothing to adjust loses the control rather than
+        # showing one that does nothing.
+        adjustable = self.controller.brightness_adjustable()
         self.brightness_label.setVisible(adjustable)
         self.brightness_slider.setVisible(adjustable)
         self.brightness_value_label.setVisible(adjustable)
-        if adjustable:
-            self.brightness_slider.setMaximum(steps - 1)
-            # Never while they are dragging: this runs on every poll tick,
-            # and the controller already has whatever they just chose.
-            if not self.brightness_slider.isSliderDown():
-                level = self.controller.brightness_level
-                if self.brightness_slider.value() != level:
-                    # The camera already has this value -- reflect it
-                    # without writing it back.
-                    self.brightness_slider.blockSignals(True)
-                    self.brightness_slider.setValue(level)
-                    self.brightness_slider.blockSignals(False)
-                self.brightness_value_label.setText(self._brightness_name(level))
+        # Never while they are dragging, and never while a write is still
+        # pending: this runs four times a second, and the controller is
+        # behind the slider by up to one throttle interval.
+        if adjustable and not self.brightness_slider.isSliderDown() and self._pending_brightness is None:
+            position = round(self.controller.brightness * BRIGHTNESS_SLIDER_RANGE)
+            if self.brightness_slider.value() != position:
+                # The camera already has this value -- reflect it without
+                # writing it back.
+                self.brightness_slider.blockSignals(True)
+                self.brightness_slider.setValue(position)
+                self.brightness_slider.blockSignals(False)
+            self.brightness_value_label.setText(self._brightness_text(self.controller.brightness))
 
         self.start_button.setEnabled(state == State.READY)
         self.stop_button.setEnabled(state == State.RECORDING)

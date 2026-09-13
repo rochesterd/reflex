@@ -263,7 +263,7 @@ class KioskController:
         # What the student last chose, reapplied whenever an instrument
         # camera opens -- switching instruments must not silently reset the
         # picture they were happy with.
-        self.brightness_level = 0
+        self.brightness = 0.0
         # True when the last session ended at max_session_minutes rather
         # than on Stop, so the UI can say why it stopped by itself.
         self.stopped_at_time_limit = False
@@ -304,32 +304,37 @@ class KioskController:
         # the truth until start() below succeeds.
         self.selected_instrument = None
         self.instruments[key].start()
-        self.instruments[key].set_brightness_level(self.brightness_level)
+        self.instruments[key].set_brightness(self.brightness)
         self.selected_instrument = key
         # A newly started camera has no history worth carrying over.
         self._reset_freshness()
         logger.info("instrument selected: %s", key)
 
-    def set_brightness_level(self, level: int) -> None:
-        """Step the selected instrument's picture brighter or back again.
+    def set_brightness(self, amount: float) -> None:
+        """Brighten the selected instrument's picture, or take it back.
+
+        `amount` is 0.0 (the technician's calibration) to 1.0 (the most
+        that model was measured to give) -- see BaseCamera.set_brightness.
 
         Allowed *during* recording, unlike everything else on the kiosk:
         the views students need this for (cornea, lens, 90D, ONH) differ in
         brightness within one session, and a control they must stop to use
         is a control that costs them the take. It cannot damage a recording
         -- it writes a camera setting, the stream never stops, and the
-        result is visible immediately. See DECISIONS.md's 2026-09-13 entry.
+        result is visible immediately. Callers driving this from a drag
+        must throttle: see app.py's BRIGHTNESS_WRITE_MS. See DECISIONS.md's
+        2026-09-13 entries.
         """
-        self.brightness_level = max(0, level)
+        self.brightness = max(0.0, min(1.0, float(amount)))
         camera = self.instruments.get(self.selected_instrument or "")
         if camera is not None:
-            camera.set_brightness_level(self.brightness_level)
+            camera.set_brightness(self.brightness)
 
-    def brightness_levels(self) -> int:
-        """How many steps the selected instrument offers; 1 means the
-        control has nothing to do and should not be shown."""
+    def brightness_adjustable(self) -> bool:
+        """Whether the selected instrument offers anything to adjust. False
+        means the control has nothing to do and should not be shown."""
         camera = self.instruments.get(self.selected_instrument or "")
-        return getattr(camera, "BRIGHTNESS_LEVELS", 1) if camera is not None else 1
+        return bool(getattr(camera, "BRIGHTNESS_ADJUSTABLE", False)) if camera is not None else False
 
     # --- Idle / ready -------------------------------------------------
 

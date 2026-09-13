@@ -5107,3 +5107,46 @@ control still disappears for a camera offering one level.
 
 ---
 
+## 2026-09-13 — Brightness is continuous, and the writes are throttled
+
+**Decided:** the slider is continuous, `set_brightness(amount)` taking 0.0
+to 1.0 in place of an integer level. Third change to this control today;
+the previous two entries are the record of how it got here.
+
+**The range is measured, not maximal.** 1.0 is exactly where the old
+"Brightest" stop was — gamma 2.4 on the Keeler, ×4 light on the slit lamp,
+`R21` 0x38 on the older BIO — so continuity adds positions *between*
+values that were checked on hardware, and opens no new territory above
+them. 0.0 remains the technician's calibration, and nothing goes below it.
+
+**Per camera the amount buys different things**, because that is what each
+one has: a `Gamma` node on the Keeler (a tone curve, lifting shadows
+without touching the highlight), exposure-then-gain on the slit lamp
+(which publishes no gamma at all), and the bridge's brightness offset on
+the older BIO. The slit lamp's mapping is geometric — `4.0 ** amount` — so
+equal travel is equal stops rather than half the range being one stop.
+
+**Writes are throttled to one per 100 ms** (`app.py`'s
+`BRIGHTNESS_WRITE_MS`), because a drag emits values far faster than a
+GenICam node write or a USB control transfer should be issued on a stream
+that may be recording. Throttling is in the UI, not the camera: cameras
+should not know about drag rates, and `kiosk.py` has no Qt. Two properties
+the implementation must keep — the **first** move applies immediately, so
+the picture responds the instant they touch it, and the **last** always
+applies, so where a student lets go is always what the camera ends on.
+`_sync_ui()` therefore skips its reflection while a write is pending, since
+the controller is behind the slider by up to one interval.
+
+**What it cost:** the words. "Brighter" was a picture a student could
+judge; 62% is not. Only the ends keep names, and those two are the ones
+that mean something — the calibration, and the most this model gives.
+
+**The risk accepted:** the top of the slit lamp's travel is a ~33 ms
+exposure at 30 fps, a full frame period of motion blur on the hand
+movement the recording exists to capture. That was equally true of the old
+"Brightest" stop, but a student could see they were at the last stop and
+now cannot. If this bites in practice, the answer is to show the ceiling,
+not to narrow the range.
+
+---
+

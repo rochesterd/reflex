@@ -20,7 +20,7 @@ feature set, not merely unused.
 | Auto exposure / gain | — | yes, bounded by `BrightnessAutoExposureTimeMax` | on the camera board | driver, switched off after warmup |
 | White balance | — (no auto, no `BalanceRatio`) | auto only | on the camera board | driver auto, left on |
 | Black level | `BlackLevel` 0–255, **default 90** | `BlackLevelAuto` = continuous | — (bridge brightness offset instead) | — |
-| Gamma / LUT | — | both present, both unused | — | driver gamma present |
+| Gamma / LUT | — | both present; `Gamma` drives Brightness (1.0–2.4) | — | driver gamma present |
 | Picture registers | — | — | bridge `R20`–`R25` | brightness/contrast/saturation/sharpness |
 | Pixel formats | Bayer8/10/12, BGR8, BGRa8 | Mono8, Bayer8/10/12 + packed 10p/12p, RGB8, BGR8 | YUYV only | YUY2, usually MJPEG |
 | Pixel clock | `DeviceClockFrequency`, set to 80 MHz | 197 MHz (untouched) | — | — |

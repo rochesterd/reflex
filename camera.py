@@ -118,14 +118,20 @@ class BaseCamera(ABC):
     def resolution(self) -> tuple[int, int]:
         """(width, height) of frames this camera produces."""
 
-    # Brightness levels a student can step through while recording. 0 is
-    # always the technician's calibration; higher levels brighten. A camera
-    # that offers nothing stays at one level and ignores the setting, so
+    # Whether a student can brighten this camera's picture while
+    # recording. A camera that offers nothing ignores the setting, so
     # callers never branch on camera type.
-    BRIGHTNESS_LEVELS = 1
+    BRIGHTNESS_ADJUSTABLE = False
 
-    def set_brightness_level(self, level: int) -> None:
-        """Apply a brightness step. Base implementation: nothing to apply."""
+    def set_brightness(self, amount: float) -> None:
+        """Brighten the picture. `amount` runs 0.0 to 1.0, where 0.0 is the
+        technician's calibration and 1.0 is the most this camera will give
+        -- a range measured per model, not a hardware limit, so a student
+        cannot reach anywhere nobody has looked.
+
+        Each camera spends it on whatever lever it actually has, so the
+        amount is deliberately unitless. Base: nothing to apply.
+        """
 
     def start(self) -> None:
         if self._thread is not None:

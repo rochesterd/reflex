@@ -209,10 +209,10 @@ class IdsCamera(BaseCamera):
         # opens on the uEye transport layer, so it is set here every time --
         # and before Width/Height are read, since it changes them.
         self._black_level = black_level
-        # Set by set_brightness_level() and reapplied at every open, since a
+        # Set by set_brightness() and reapplied at every open, since a
         # camera that was restarted (switching instruments) must come back
         # the way the student left it.
-        self._brightness_level = 0
+        self._brightness = 0.0
         self._binning = binning
         # None keeps whatever the camera powers up in (BayerRG8 on both of
         # ours). Set before buffers are announced, since payload size
@@ -380,8 +380,8 @@ class IdsCamera(BaseCamera):
             # clamped to 11.46 and nothing raised it again.
             if self._target_fps is not None:
                 self._apply_frame_rate_cap(self._target_fps)
-            if self._brightness_level:
-                self.set_brightness_level(self._brightness_level)
+            if self._brightness:
+                self.set_brightness(self._brightness)
         except Exception:
             # A failure partway through leaves whatever got opened so far
             # (device, data stream, a running acquisition) dangling with
@@ -547,35 +547,43 @@ class IdsCamera(BaseCamera):
         node = self._node_map.FindNode("Gain")
         return float(node.Minimum()), float(node.Maximum())
 
-    # Three steps, because a student choosing between "normal, brighter,
-    # brightest" is choosing a picture, not a number. What each step *does*
-    # differs per camera, deliberately: the Keeler applies a tone curve on
-    # board, which lifts shadows without touching the highlight, while the
-    # slit lamp has no gamma node at all and must spend light instead.
-    BRIGHTNESS_LEVELS = 3
-    # Measured 2026-09-13 on the Keeler: 1.6 and 2.4 raise the frame median
-    # from 2 to roughly 12 and 28 while the highlight stays under 240.
-    _GAMMA_BY_LEVEL = (1.0, 1.6, 2.4)
-    # For a camera with no gamma: total light, relative to the technician's
-    # calibration. Spent on exposure up to the frame-rate budget first and
-    # only then on gain, which is the same preference auto_calibrate uses.
-    _LIGHT_BY_LEVEL = (1.0, 2.0, 4.0)
+    BRIGHTNESS_ADJUSTABLE = True
+    # What a camera *does* with the amount differs, deliberately: the
+    # Keeler applies a tone curve on board, which lifts shadows without
+    # touching the highlight, while the slit lamp publishes no gamma node
+    # at all and has to spend light instead.
+    #
+    # Measured 2026-09-13 on the Keeler: gamma 2.4 raises the frame median
+    # from 2 to roughly 28 while the highlight stays under 240. Linear in
+    # amount, gamma being a perceptual curve already.
+    _GAMMA_AT_FULL = 2.4
+    # For a camera with no gamma: total light at amount 1.0, relative to
+    # the technician's calibration. Spent on exposure up to the frame-rate
+    # budget first and only then on gain -- the same preference
+    # auto_calibrate uses. Geometric rather than linear, so equal travel is
+    # equal stops: halfway is 2x, not 2.5x.
+    _LIGHT_AT_FULL = 4.0
 
-    def set_brightness_level(self, level: int) -> None:
-        """Step the picture brighter without leaving what the hardware can
-        sustain: never past the frame-rate budget, never past the gain
-        ceiling, never below the technician's calibration.
+    def set_brightness(self, amount: float) -> None:
+        """Brighten without leaving what the hardware can sustain: never
+        past the frame-rate budget, never past the gain ceiling, never
+        below the technician's calibration.
         """
-        level = max(0, min(self.BRIGHTNESS_LEVELS - 1, int(level)))
-        self._brightness_level = level
+        amount = max(0.0, min(1.0, float(amount)))
+        self._brightness = amount
         if self._node_map is None:
             return  # applied at open instead
 
-        gamma = self._node_map.TryFindNode("Gamma")
-        if gamma is not None and gamma.IsWriteable():
-            wanted = self._GAMMA_BY_LEVEL[level]
-            gamma.SetValue(min(float(gamma.Maximum()), max(float(gamma.Minimum()), wanted)))
-            logger.info("%s: brightness level %d (gamma %.2f)", self.label, level, gamma.Value())
+        gamma_node = self._node_map.TryFindNode("Gamma")
+        if gamma_node is not None and gamma_node.IsWriteable():
+            wanted = 1.0 + amount * (self._GAMMA_AT_FULL - 1.0)
+            gamma_node.SetValue(
+                min(float(gamma_node.Maximum()), max(float(gamma_node.Minimum()), wanted))
+            )
+            logger.info(
+                "%s: brightness %.0f%% (gamma %.2f)",
+                self.label, amount * 100, gamma_node.Value(),
+            )
             return
 
         # No tone curve on this camera: spend light instead, exposure first.
@@ -587,14 +595,14 @@ class IdsCamera(BaseCamera):
             self.exposure_time_range_us(),
             base_gain,
             self.gain_range(),
-            target=self._LIGHT_BY_LEVEL[level],
+            target=self._LIGHT_AT_FULL**amount,
             max_exposure_us=exposure_budget_us(self._target_fps) if self._target_fps else None,
         )
         self.set_exposure_time_us(exposure)
         self.set_gain(gain)
         logger.info(
-            "%s: brightness level %d (exposure %.1fms, gain %.2fx)",
-            self.label, level, exposure / 1000, gain,
+            "%s: brightness %.0f%% (exposure %.1fms, gain %.2fx)",
+            self.label, amount * 100, exposure / 1000, gain,
         )
 
     def _apply_black_level(self) -> None:

@@ -215,6 +215,7 @@ def _quiesce(window) -> None:
     window.preview_timer.stop()
     window.poll_timer.stop()
     window.camera_retry_timer.stop()
+    window.brightness_timer.stop()
 
 
 class TestUnexportedSessionOnClose(unittest.TestCase):
@@ -480,10 +481,10 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
                 third_person.stop()
                 instrument.stop()
 
-    def test_the_slider_names_the_step_it_is_on(self):
-        """A student judges brightness by the picture, so the control says
-        "Brighter", not "1". The word is what makes the position mean
-        something before they have moved it."""
+    def test_the_ends_are_named_and_the_middle_is_a_percentage(self):
+        """The two ends mean something a student can act on -- the
+        technician's calibration, and the most this model was measured to
+        give. In between, a percentage is the only honest label."""
         third_person = SyntheticCamera(160, 120, fps=30)
         instrument = SyntheticCamera(160, 120, fps=30)
         with tempfile.TemporaryDirectory() as tmp_root:
@@ -492,15 +493,17 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
             try:
                 self.assertEqual(window.brightness_value_label.text(), "Normal")
 
-                window.brightness_slider.setValue(2)
-
+                window.brightness_slider.setValue(100)
                 self.assertEqual(window.brightness_value_label.text(), "Brightest")
-                self.assertEqual(window.controller.brightness_level, 2)
+                self.assertEqual(window.controller.brightness, 1.0)
+
+                window.brightness_slider.setValue(40)
+                self.assertEqual(window.brightness_value_label.text(), "40%")
             finally:
                 third_person.stop()
                 instrument.stop()
 
-    def test_the_slider_has_one_stop_per_step_the_camera_offers(self):
+    def test_the_slider_is_continuous_over_the_measured_range(self):
         third_person = SyntheticCamera(160, 120, fps=30)
         instrument = SyntheticCamera(160, 120, fps=30)
         with tempfile.TemporaryDirectory() as tmp_root:
@@ -510,14 +513,70 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
                 window._on_instrument_clicked("slit_lamp")
                 window._sync_ui()
 
-                steps = window.controller.brightness_levels()
-                self.assertGreater(steps, 1)
+                self.assertTrue(window.controller.brightness_adjustable())
                 self.assertEqual(window.brightness_slider.minimum(), 0)
-                self.assertEqual(window.brightness_slider.maximum(), steps - 1)
-                # One stop per press: three positions should never need a
-                # precise drag.
-                self.assertEqual(window.brightness_slider.pageStep(), 1)
-                self.assertTrue(window.brightness_slider.isVisible() or window.isHidden())
+                self.assertEqual(
+                    window.brightness_slider.maximum(), app.BRIGHTNESS_SLIDER_RANGE
+                )
+            finally:
+                third_person.stop()
+                instrument.stop()
+
+    def test_a_drag_reaches_the_camera_at_most_once_per_interval(self):
+        """Every write is a GenICam node write or a USB control transfer on
+        a stream that may be recording, and a drag fires far faster than
+        that. See app.py's BRIGHTNESS_WRITE_MS."""
+        third_person = SyntheticCamera(160, 120, fps=30)
+        instrument = SyntheticCamera(160, 120, fps=30)
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            _quiesce(window)
+            try:
+                with patch.object(window.controller, "set_brightness") as setter:
+                    # The first move of a drag is never delayed: the picture
+                    # has to respond the instant they touch it.
+                    window.brightness_slider.setValue(10)
+                    self.assertEqual(setter.call_count, 1)
+                    self.assertEqual(setter.call_args.args[0], 0.1)
+
+                    # The rest of the drag is coalesced, but the label
+                    # follows every move -- only the camera write is thinned.
+                    window.brightness_slider.setValue(20)
+                    window.brightness_slider.setValue(30)
+                    self.assertEqual(setter.call_count, 1)
+                    self.assertEqual(window.brightness_value_label.text(), "30%")
+
+                    # When the interval elapses, the newest value goes --
+                    # not the ones it skipped past.
+                    window._flush_brightness()
+                    self.assertEqual(setter.call_count, 2)
+                    self.assertEqual(setter.call_args.args[0], 0.3)
+            finally:
+                third_person.stop()
+                instrument.stop()
+
+    def test_the_resting_position_is_always_what_the_camera_gets(self):
+        """The one property the throttle must never break: a student lets
+        go, and the picture matches where they let go."""
+        third_person = SyntheticCamera(160, 120, fps=30)
+        instrument = SyntheticCamera(160, 120, fps=30)
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            _quiesce(window)
+            try:
+                with patch.object(window.controller, "set_brightness") as setter:
+                    for position in range(0, 71, 5):  # a drag, many moves
+                        window.brightness_slider.setValue(position)
+                    window._flush_brightness()  # the interval after they stop
+
+                    self.assertEqual(setter.call_args.args[0], 0.7)
+                    # Far fewer writes than moves.
+                    self.assertLess(setter.call_count, 5)
+
+                    # And once nothing is pending the timer stops rather
+                    # than ticking forever behind an idle slider.
+                    window._flush_brightness()
+                    self.assertFalse(window.brightness_timer.isActive())
             finally:
                 third_person.stop()
                 instrument.stop()
@@ -532,14 +591,14 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
             _quiesce(window)
             try:
                 window._on_instrument_clicked("slit_lamp")
-                window.controller.brightness_level = 1  # e.g. restored on restart
+                window.controller.brightness = 0.6  # e.g. reapplied on restart
 
-                with patch.object(window.controller, "set_brightness_level") as setter:
+                with patch.object(window.controller, "set_brightness") as setter:
                     window._sync_ui()
 
                 setter.assert_not_called()
-                self.assertEqual(window.brightness_slider.value(), 1)
-                self.assertEqual(window.brightness_value_label.text(), "Brighter")
+                self.assertEqual(window.brightness_slider.value(), 60)
+                self.assertEqual(window.brightness_value_label.text(), "60%")
             finally:
                 third_person.stop()
                 instrument.stop()
