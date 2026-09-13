@@ -99,6 +99,16 @@ class SyntheticCamera(BaseCamera):
         image = self._render(elapsed, frame_index)
         return image, time.monotonic(), frame_index
 
+    # Mirrors what a real instrument camera offers, so the brightness
+    # control is visible and exercisable with no hardware attached -- which
+    # is how most of this app is developed. See CLAUDE.md's Environment
+    # section.
+    BRIGHTNESS_LEVELS = 3
+    _BRIGHTNESS_GAIN = (1.0, 1.6, 2.4)
+
+    def set_brightness_level(self, level: int) -> None:
+        self._brightness_level = max(0, min(self.BRIGHTNESS_LEVELS - 1, int(level)))
+
     def _render(self, elapsed: float, frame_index: int) -> np.ndarray:
         w, h = self._width, self._height
         image = np.zeros((h, w, 3), dtype=np.uint8)
@@ -149,4 +159,7 @@ class SyntheticCamera(BaseCamera):
             cv2.LINE_AA,
         )
 
+        gain = self._BRIGHTNESS_GAIN[getattr(self, "_brightness_level", 0)]
+        if gain != 1.0:
+            image = np.clip(image.astype(np.float32) * gain, 0, 255).astype(np.uint8)
         return image

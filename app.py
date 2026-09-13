@@ -92,6 +92,11 @@ LOG_FILE = LOG_DIR / "app.log"
 
 THIRD_PERSON_LABEL = "third-person camera"
 
+# What the brightness steps are called. A student picks a picture, not a
+# gamma value -- and the words have to mean something with the instrument
+# at their eye, not on a spec sheet.
+BRIGHTNESS_STEP_NAMES = ("Normal", "Brighter", "Brightest")
+
 
 def _format_clock(seconds: float) -> str:
     """m:ss, for the recording time shown against the limit."""
@@ -245,6 +250,24 @@ class KioskWindow(QMainWindow):
         # recordings-are-PII entry: this comes back when a session belongs
         # to somebody.
 
+        # The one control a student may touch mid-recording. Three named
+        # steps rather than a slider: "brighter" is a judgement they can
+        # make from the picture, a number is not. See DECISIONS.md's
+        # 2026-09-13 brightness entry.
+        self.brightness_label = QLabel("Brightness")
+        self.brightness_label.setObjectName(reflex_style.SECONDARY)
+        self.brightness_buttons: list[QPushButton] = []
+        brightness_row = QHBoxLayout()
+        brightness_row.addWidget(self.brightness_label)
+        for index, text in enumerate(BRIGHTNESS_STEP_NAMES):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setChecked(index == 0)
+            button.setMinimumHeight(34)
+            button.clicked.connect(functools.partial(self._on_brightness_clicked, index))
+            self.brightness_buttons.append(button)
+            brightness_row.addWidget(button)
+
         buttons = QHBoxLayout()
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.stop_button)
@@ -264,6 +287,7 @@ class KioskWindow(QMainWindow):
         layout.addWidget(self.error_banner)
         layout.addWidget(self.video_label)
         layout.addLayout(picker)
+        layout.addLayout(brightness_row)
         layout.addLayout(buttons)
         layout.addWidget(self.status_label)
         layout.addLayout(summary_row)
@@ -335,6 +359,11 @@ class KioskWindow(QMainWindow):
         self._desired_instrument = key
         self._try_select_instrument()
         self._sync_ui()
+
+    def _on_brightness_clicked(self, level: int) -> None:
+        self.controller.set_brightness_level(level)
+        for index, button in enumerate(self.brightness_buttons):
+            button.setChecked(index == level)
 
     def _on_start_clicked(self) -> None:
         if self.controller.state != State.READY:
@@ -417,6 +446,11 @@ class KioskWindow(QMainWindow):
     def _sync_ui(self, preflight: PreflightStatus | None = None) -> None:
         state = self.controller.state
         self.mark.set_recording(state == State.RECORDING)
+        steps = self.controller.brightness_levels()
+        self.brightness_label.setVisible(steps > 1)
+        for index, button in enumerate(self.brightness_buttons):
+            button.setVisible(steps > 1 and index < steps)
+
         self.start_button.setEnabled(state == State.READY)
         self.stop_button.setEnabled(state == State.RECORDING)
         for key, button in self._instrument_buttons.items():

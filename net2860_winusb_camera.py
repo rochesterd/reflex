@@ -202,6 +202,20 @@ class Net2860WinUsbCamera(BaseCamera):
             self._dev.close()
             self._dev = None
 
+    # The bridge has no exposure to give, but it does have a brightness
+    # offset -- measured 2026-09-13 raising the frame mean from 77 to 151
+    # across its range. Three steps from the vendor's own value upwards.
+    BRIGHTNESS_LEVELS = 3
+    _BRIGHTNESS_BY_LEVEL = (0x08, 0x20, 0x38)
+
+    def set_brightness_level(self, level: int) -> None:
+        level = max(0, min(self.BRIGHTNESS_LEVELS - 1, int(level)))
+        self._picture["brightness"] = self._BRIGHTNESS_BY_LEVEL[level]
+        if self._dev is not None:
+            self._apply_picture()
+        logger.info("%s: brightness level %d (offset 0x%02x)",
+                    self.label, level, self._picture["brightness"])
+
     def _apply_picture(self) -> None:
         """Set the bridge's picture registers after the captured bring-up.
 

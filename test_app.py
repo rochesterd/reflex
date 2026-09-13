@@ -347,6 +347,25 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
     visible before it's reached and reported as a normal stop when it is.
     See DECISIONS.md's "First round of student feedback" entry."""
 
+    def test_brightness_stays_usable_while_recording(self):
+        """The one control a student may touch mid-session: the views that
+        need it differ in brightness within a single recording, and a
+        control they must stop to use costs them the take."""
+        third_person = SyntheticCamera(160, 120, fps=30)
+        instrument = SyntheticCamera(160, 120, fps=30)
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            try:
+                window.controller.state = State.RECORDING
+                window._sync_ui()
+
+                self.assertFalse(window.start_button.isEnabled())
+                for button in window.brightness_buttons:
+                    self.assertTrue(button.isEnabled())
+            finally:
+                third_person.stop()
+                instrument.stop()
+
     def test_buttons_say_what_they_do(self):
         third_person = SyntheticCamera(160, 120, fps=30)
         instrument = SyntheticCamera(160, 120, fps=30)

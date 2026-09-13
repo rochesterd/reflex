@@ -258,6 +258,10 @@ class KioskController:
         self.last_session_info: dict | None = None
         self.last_session_dir: Path | None = None
         self.selected_instrument: str | None = None
+        # What the student last chose, reapplied whenever an instrument
+        # camera opens -- switching instruments must not silently reset the
+        # picture they were happy with.
+        self.brightness_level = 0
         # True when the last session ended at max_session_minutes rather
         # than on Stop, so the UI can say why it stopped by itself.
         self.stopped_at_time_limit = False
@@ -298,10 +302,32 @@ class KioskController:
         # the truth until start() below succeeds.
         self.selected_instrument = None
         self.instruments[key].start()
+        self.instruments[key].set_brightness_level(self.brightness_level)
         self.selected_instrument = key
         # A newly started camera has no history worth carrying over.
         self._reset_freshness()
         logger.info("instrument selected: %s", key)
+
+    def set_brightness_level(self, level: int) -> None:
+        """Step the selected instrument's picture brighter or back again.
+
+        Allowed *during* recording, unlike everything else on the kiosk:
+        the views students need this for (cornea, lens, 90D, ONH) differ in
+        brightness within one session, and a control they must stop to use
+        is a control that costs them the take. It cannot damage a recording
+        -- it writes a camera setting, the stream never stops, and the
+        result is visible immediately. See DECISIONS.md's 2026-09-13 entry.
+        """
+        self.brightness_level = max(0, level)
+        camera = self.instruments.get(self.selected_instrument or "")
+        if camera is not None:
+            camera.set_brightness_level(self.brightness_level)
+
+    def brightness_levels(self) -> int:
+        """How many steps the selected instrument offers; 1 means the
+        control has nothing to do and should not be shown."""
+        camera = self.instruments.get(self.selected_instrument or "")
+        return getattr(camera, "BRIGHTNESS_LEVELS", 1) if camera is not None else 1
 
     # --- Idle / ready -------------------------------------------------
 

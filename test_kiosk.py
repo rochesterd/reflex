@@ -908,5 +908,71 @@ class KeepAwakeTests(unittest.TestCase):
         self.assertEqual(self._run(body), [True, False])
 
 
+class _BrightnessCamera(SyntheticCamera):
+    """Records what level it was told, the way a real camera would apply
+    one."""
+
+    BRIGHTNESS_LEVELS = 3
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.levels = []
+
+    def set_brightness_level(self, level: int) -> None:
+        self.levels.append(level)
+
+
+class BrightnessTests(unittest.TestCase):
+    def _controller(self, tmp_root, instruments, third):
+        return KioskController(third, instruments, output_root=tmp_root, fps=30)
+
+    def test_the_level_reaches_the_selected_instrument(self):
+        with tempfile.TemporaryDirectory() as tmp_root:
+            third = SyntheticCamera(160, 120, fps=30, name="third")
+            instrument = _BrightnessCamera(160, 120, fps=30, name="instrument")
+            controller = self._controller(tmp_root, {"instrument": instrument}, third)
+            try:
+                controller.select_instrument("instrument")
+                controller.set_brightness_level(2)
+                self.assertEqual(instrument.levels[-1], 2)
+                self.assertEqual(controller.brightness_level, 2)
+            finally:
+                instrument.stop()
+
+    def test_switching_instruments_keeps_the_students_choice(self):
+        """A camera that was restarted must come back the way they left it
+        -- otherwise changing instrument silently resets the picture."""
+        with tempfile.TemporaryDirectory() as tmp_root:
+            third = SyntheticCamera(160, 120, fps=30, name="third")
+            first = _BrightnessCamera(160, 120, fps=30, name="first")
+            second = _BrightnessCamera(160, 120, fps=30, name="second")
+            controller = self._controller(tmp_root, {"a": first, "b": second}, third)
+            try:
+                controller.select_instrument("a")
+                controller.set_brightness_level(1)
+                controller.select_instrument("b")
+                self.assertEqual(second.levels[-1], 1)
+            finally:
+                first.stop()
+                second.stop()
+
+    def test_a_camera_without_levels_is_simply_told_nothing_useful(self):
+        """A camera offering one level takes the call and ignores it, so
+        callers never branch on camera type."""
+        class _PlainCamera(SyntheticCamera):
+            BRIGHTNESS_LEVELS = 1
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            third = SyntheticCamera(160, 120, fps=30, name="third")
+            plain = _PlainCamera(160, 120, fps=30, name="plain")
+            controller = self._controller(tmp_root, {"plain": plain}, third)
+            try:
+                controller.select_instrument("plain")
+                controller.set_brightness_level(2)  # must not raise
+                self.assertEqual(controller.brightness_levels(), 1)
+            finally:
+                plain.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

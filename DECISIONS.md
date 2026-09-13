@@ -4892,3 +4892,53 @@ comes back.
 **Cost, stated plainly:** a student who wants last week's recording can no
 longer reach it from the kiosk. That is a real loss of function, accepted
 because the alternative is every student reaching everyone else's.
+
+---
+
+## 2026-09-13 - A brightness control, live during recording
+
+From the second feedback round: some views (cornea, lens, 90D, ONH) need
+more light than others, and they asked for a toggle like the Ion's. Built
+as three named steps -- Normal, Brighter, Brightest -- and, on the
+developer's decision, **usable while recording**.
+
+**Why that is allowed when nothing else is.** The rule exists so a student
+cannot interrupt an irreplaceable capture. This control cannot: it writes a
+camera setting, the stream never stops, no file is touched, and the result
+is visible in the preview immediately. The alternative -- stop, adjust,
+start again -- costs the take, and the views that need adjusting differ
+*within* one session, which is exactly when a student cannot afford to
+restart.
+
+**Per-instrument mechanism, one vocabulary.** What a step does depends on
+what the camera has, because the student judges the picture, not the
+method:
+
+| camera | lever | steps |
+|---|---|---|
+| Keeler BIO | on-camera gamma | 1.0 / 1.6 / 2.4 |
+| slit lamp | light: exposure to the frame-rate budget, then gain | 1x / 2x / 4x |
+| older BIO | the bridge's brightness offset | 0x08 / 0x20 / 0x38 |
+| synthetic | a gain on the rendered frame | 1.0 / 1.6 / 2.4 |
+
+The slit lamp has no gamma node, so it spends light instead -- through
+`next_exposure_gain()`, the same function `auto_calibrate()` uses, which
+prefers exposure up to the budget and the least gain that will do. A step
+therefore cannot exceed the frame-rate budget or the gain ceiling: a
+student can reach a picture that looks different, never one that breaks a
+recording.
+
+**Level 0 is always the technician's calibration**, and the level is held
+by `KioskController` rather than the camera, so switching instruments
+reapplies it -- changing instrument must not silently reset a picture the
+student was happy with.
+
+**`SyntheticCamera` gained the same three steps**, so the control is
+visible and exercisable with no hardware attached. Without that, the one
+feature students asked to *touch* would be the one feature a developer
+could not see.
+
+**Not yet verified on the instruments.** The numbers come from the
+2026-09-13 measurements, but the cameras were unplugged before this was
+built. The BIO's gamma steps in particular want a look against a lit
+fundus -- the same measurement its default value is waiting on.
