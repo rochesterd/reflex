@@ -92,6 +92,11 @@ Source: "dist\settings\*"; DestDir: "{app}\settings"; Flags: ignoreversion recur
 Source: "net2860_winusb\reflex_net2860.inf"; DestDir: "{app}\driver"; Flags: ignoreversion
 Source: "net2860_winusb\reflex_net2860.cat"; DestDir: "{app}\driver"; Flags: ignoreversion
 Source: "net2860_winusb\reflex_net2860.cer"; DestDir: "{app}\driver"; Flags: ignoreversion
+; The logon sweep of the recording buffer. Installed rather than run once:
+; the scheduled task below invokes it at every logon, which is the only
+; thing that clears a buffer left by a crash -- see the script's own header
+; and session_buffer.py.
+Source: "clear_reflex_buffer.ps1"; DestDir: "{app}\cleanup"; Flags: ignoreversion
 
 [Icons]
 ; app.exe only on the Desktop -- this is what closes the "how does a
@@ -102,6 +107,24 @@ Source: "net2860_winusb\reflex_net2860.cer"; DestDir: "{app}\driver"; Flags: ign
 Name: "{autodesktop}\Reflex"; Filename: "{app}\app\app.exe"
 Name: "{autoprograms}\Reflex"; Filename: "{app}\app\app.exe"
 Name: "{autoprograms}\Reflex Settings"; Filename: "{app}\settings\settings.exe"
+
+[Run]
+; Reflex deletes its recording buffer at start and at exit, but an app
+; cannot clean up after its own crash. This task is that third case: it
+; runs as SYSTEM at logon and sweeps every profile's buffer, so a machine
+; that was power-cycled mid-session does not keep two students' faces on
+; disk until someone next launches the app.
+;
+; The nested quoting is schtasks', not Inno's: /TR takes one quoted command
+; line, and the path inside it needs \" escapes of its own. Verify after
+; any edit with:  schtasks /Query /TN "Reflex buffer cleanup" /V /FO LIST
+Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""Reflex buffer cleanup"" /RU SYSTEM /SC ONLOGON /TR ""powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \""{app}\cleanup\clear_reflex_buffer.ps1\"""""; StatusMsg: "Registering the recording-buffer cleanup task..."; Flags: runhidden waituntilterminated
+
+[UninstallRun]
+; Unlike the recordings this installer used to leave alone, the task is
+; ours and nothing else uses it -- a scheduled task pointing at a deleted
+; script is litter, and one deleting folders is worse than litter.
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /F /TN ""Reflex buffer cleanup"""; Flags: runhidden; RunOnceId: "RemoveReflexBufferCleanupTask"
 
 [Code]
 var
@@ -365,9 +388,9 @@ procedure RemoveLegacyBioDriver();
    an accident of what was absent from [Files] rather than a decision (see
    DECISIONS.md's 2026-09-10 uninstall-scope entry):
 
-     - Recordings, wherever sessions_dir points. CLAUDE.md is explicit that
-       these are irreplaceable student work, not build output. An uninstall
-       must never take them.
+     - Nothing to do with recordings. There is no recordings folder any
+       more: sessions live in a buffer the app deletes (session_buffer.py),
+       and [UninstallRun] removes the logon task that sweeps it.
      - config.json. Cheap to keep, and it holds a technician's camera
        assignments and calibration -- a reinstall that finds them intact is
        strictly better than one that does not.

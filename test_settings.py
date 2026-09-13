@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
-from config import load_config, resolve_default_sessions_dir
+from config import load_config
 from device_presets import CUSTOM_PROFILE_ID
 from settings import DeviceRow, SettingsWindow
 from synthetic_camera import SyntheticCamera
@@ -251,8 +251,7 @@ class SettingsWindowTest(unittest.TestCase):
         window._on_save_clicked()
 
         written = json.loads(self.config_path.read_text(encoding="utf-8"))
-        expected = {**VALID_CONFIG, "sessions_dir": str(resolve_default_sessions_dir())}
-        self.assertEqual(written, expected)
+        self.assertEqual(written, VALID_CONFIG)
 
     def test_a_row_with_no_device_claims_nothing(self):
         """A row holding no camera has no business naming an instrument, so
@@ -368,7 +367,6 @@ class SettingsWindowTest(unittest.TestCase):
         window = self._make_window(
             ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE]
         )
-        window.sessions_dir_edit.setText("D:\\elsewhere")  # touch something the UI owns
         window._on_save_clicked()
 
         written = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -379,7 +377,6 @@ class SettingsWindowTest(unittest.TestCase):
             written["instruments"]["indirect_scope"],
             {"kind": "ids", "serial": "333", "label": "Indirect Scope"},
         )
-        self.assertEqual(written["sessions_dir"], "D:\\elsewhere")
         load_config(self.config_path)  # the merged result still parses
 
     def test_save_drops_an_orientation_override_when_the_role_becomes_net2860(self):
@@ -586,36 +583,6 @@ class SettingsWindowTest(unittest.TestCase):
         window.rescan()
 
         self.assertIn("ids_peak not installed", window._instrument_rows["slit_lamp"].status_label.text())
-
-    def test_sessions_dir_defaults_to_resolved_default(self):
-        window = self._make_window()
-
-        self.assertEqual(window.sessions_dir_edit.text(), str(resolve_default_sessions_dir()))
-
-    def test_existing_sessions_dir_is_loaded_from_config(self):
-        data = {**VALID_CONFIG, "sessions_dir": "D:\\recordings"}
-        self.config_path.write_text(json.dumps(data), encoding="utf-8")
-
-        window = self._make_window()
-
-        self.assertEqual(window.sessions_dir_edit.text(), "D:\\recordings")
-
-    def test_browse_button_updates_sessions_dir(self):
-        window = self._make_window()
-
-        with patch("settings.QFileDialog.getExistingDirectory", return_value="E:\\backup"):
-            window._on_browse_sessions_dir()
-
-        self.assertEqual(window.sessions_dir_edit.text(), "E:\\backup")
-
-    def test_cancelled_browse_leaves_sessions_dir_unchanged(self):
-        window = self._make_window()
-        original = window.sessions_dir_edit.text()
-
-        with patch("settings.QFileDialog.getExistingDirectory", return_value=""):
-            window._on_browse_sessions_dir()
-
-        self.assertEqual(window.sessions_dir_edit.text(), original)
 
     def test_preview_button_uses_the_injected_factory(self):
         calls = []

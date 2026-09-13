@@ -111,13 +111,7 @@ Close the Preview window. Repeat steps 3–5 for the second instrument.
 On the older BIO there is no Auto-Calibrate button and no sliders — that's
 expected. Just check the picture and the focus, and close.
 
-### 7. Set the recordings folder
-
-Use **Browse...** to point at where recordings should be kept. If old
-recordings should be cleaned up automatically, tick **Automatically delete
-old recordings** and set the age.
-
-### 8. Save
+### 7. Save
 
 Press **Save**. Nothing you did in Preview is stored until you do.
 
@@ -125,7 +119,7 @@ Save refuses if the same camera is assigned to two roles, and warns you if
 a role is left empty — an empty role means students won't see that
 instrument at all.
 
-### 9. Restart the recorder, with the room in its normal state
+### 8. Restart the recorder, with the room in its normal state
 
 Close Settings and start the recorder app from its Desktop shortcut.
 
@@ -135,7 +129,7 @@ own exposure in the first couple of seconds and then holds it for the whole
 session. If the room lighting changes a lot later (blinds opened, lights
 switched off), restart the app.
 
-### 10. Do one real test recording
+### 9. Do one real test recording
 
 This is the step that actually proves the install:
 
@@ -152,9 +146,16 @@ This is the step that actually proves the install:
 4. Press **Stop Recording**, then **Watch Last Recording**.
 5. Check both panes: right way up, in focus, bright enough to see what the
    hands and the optics are doing, and moving smoothly.
+6. With a USB drive plugged in, press **Export video...** and save to it.
+   This is how students keep a recording, so it is part of the test.
 
 Repeat for the second instrument. If both play back well, the room is
 ready.
+
+**Tell instructors this, because students need to hear it:** Reflex keeps
+nothing. A recording lives only until the app is closed, and a student who
+does not Export to their own drive loses it. The app warns before closing,
+but the habit is what matters.
 
 ---
 
@@ -167,7 +168,7 @@ The status line always names the reason. The common ones:
 | "Select an instrument to begin." | Nothing picked yet. |
 | "…the picture is frozen — the camera is on but not seeing anything." | The camera is delivering the same image over and over. Unplug and replug it; if it persists, that camera has a fault. |
 | "Waiting for: cameras live…" | A camera isn't running. Check it's plugged in, then restart the app. |
-| "Waiting for: free disk space…" | Not enough room for a session. Clear space, or turn on automatic deletion in Settings. |
+| "Waiting for: free disk space…" | Not enough room for a session. Clear space on the machine's drive. |
 
 ---
 

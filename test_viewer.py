@@ -222,16 +222,36 @@ class ViewerExportTest(unittest.TestCase):
 
         mock_run.assert_called_once_with(target, "instrument")
 
-    def test_export_suggests_a_name_beside_the_recording(self):
+    def test_export_suggests_a_name_on_the_export_drive_not_the_buffer(self):
+        """The session folder is a buffer the app deletes, so suggesting a
+        name inside it would suggest saving nowhere. See session_buffer.py."""
         dialog = self._dialog()
         dialog.layout_box.setCurrentIndex(dialog.layout_box.findData("side_by_side"))
+        drive = Path(self._tmp.name) / "student-drive"
 
-        with patch("viewer.QFileDialog.getSaveFileName", return_value=("", "")) as mock_dialog:
-            dialog._on_export_clicked()
+        with patch("viewer.default_export_dir", return_value=drive):
+            with patch("viewer.QFileDialog.getSaveFileName", return_value=("", "")) as mock_dialog:
+                dialog._on_export_clicked()
 
         suggested = Path(mock_dialog.call_args.args[2])
         self.assertEqual(suggested.name, "side_by_side.mp4")
-        self.assertEqual(suggested.parent, self.session_dir)
+        self.assertEqual(suggested.parent, drive)
+        self.assertNotEqual(suggested.parent, self.session_dir)
+
+    def test_a_finished_export_is_reported_to_the_caller(self):
+        """How app.py learns a session has been taken somewhere that
+        outlives the buffer (see app.py's _unexported_session)."""
+        exported = []
+        dialog = ViewerDialog(Session.load(self.session_dir), on_export=exported.append)
+        self.addCleanup(dialog._shutdown)
+        out = Path(self._tmp.name) / "out.mp4"
+
+        with patch("viewer.QMessageBox.information"):
+            dialog._report_export({"kind": "done", "payload": str(out)}, out)
+        self.assertEqual(exported, [out])
+
+        dialog._report_export({"kind": "cancelled"}, out)
+        self.assertEqual(exported, [out])
 
     def test_cancelling_the_save_dialog_exports_nothing(self):
         dialog = self._dialog()

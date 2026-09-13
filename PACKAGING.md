@@ -59,9 +59,9 @@ machines.
 | Steps below | 2, 3, 4, 5 | 2, 6 |
 
 The clinic installer deliberately does **not** ship `viewer.exe`:
-`app.exe` already contains the viewer (Watch and Past recordings work
-from inside the kiosk), so a second full PySide6+OpenCV+PyAV tree would
-add hundreds of MB for no capability that machine lacks.
+`app.exe` already contains the viewer (Watch Last Recording opens it from
+inside the kiosk), so a second PySide6+OpenCV+PyAV tree would add hundreds
+of MB for no capability that machine lacks.
 
 ## 2. Freeze the entry points
 
@@ -96,9 +96,8 @@ machine can't satisfy. Confirmed on the 2026-09-02 build — the frozen
   `packaging\dist\settings\settings.exe` must open with no import/DLL
   errors.
 - `packaging\dist\viewer\viewer.exe <a session folder>` must play it, and
-  `viewer.exe` with no arguments must show the picker (it logs "no usable
-  config.json … using the default recordings folder" and lists nothing —
-  that's the correct review-machine path, not a failure).
+  `viewer.exe` with no arguments must show the picker, opened on the home
+  folder and listing nothing — the correct path, not a failure.
 - Each exe must show its icon in Explorer **and** in its own title bar
   once running — those are two different mechanisms (exe resource vs.
   the bundled `.ico`), so one can be broken while the other looks fine.
@@ -244,8 +243,8 @@ the old kiosk still works, and records into its own folder, which nothing
 in Reflex lists. Uninstalling sidebyside (Settings → Apps) is cleaner and
 still fine; its uninstaller removes its own driver package and signing
 certificate. Either way redo `CALIBRATION.md` rather than copying
-`%ProgramData%\sidebyside\config.json` over — it names the old
-`sessions_dir` and carries an unproven calibration. The same shortcut rule
+`%ProgramData%\sidebyside\config.json` over — it carries an
+unproven calibration. The same shortcut rule
 applies to a laptop's old `sidebyside Viewer`. See DECISIONS.md's
 2026-09-11 coexistence entry.
 
@@ -257,7 +256,11 @@ silently now), the Finished page shows the native "restart now / restart
 later" choice (not a separate popup — see `DECISIONS.md`'s "Silent IDS
 peak install: native restart page" entry for why the install runs
 *before* Reflex's own files specifically to make this work), and
-choosing "restart now" genuinely restarts the machine. And — on a machine
+choosing "restart now" genuinely restarts the machine. Confirm the buffer
+cleanup task registered — its quoting is only exercised at install time:
+`schtasks /Query /TN "Reflex buffer cleanup" /V /FO LIST` must name
+`clear_reflex_buffer.ps1`, and `/Run` on it must empty the buffer under
+`%LOCALAPPDATA%\Temp\Reflex`. And — on a machine
 that already has a current-enough IDS peak installed — re-running
 `reflex-setup.exe` skips reinstalling it (`IdsPeakAlreadyInstalled` in
 `packaging/reflex.iss`'s `[Code]` section) and the Finished page shows
@@ -276,19 +279,17 @@ DECISIONS.md's 2026-09-10 "Uninstall scope is now a decision" entry.
 - Everything under `{app}` — both frozen exes and the driver package files
 - The staged WinUSB driver package (`pnputil /delete-driver ... /uninstall`)
 - The signing certificate, from both Trusted Root and Trusted Publishers
+- The **Reflex buffer cleanup** task — a folder-deleting scheduled task must not outlive its script
 
 The driver's published name (`oemNN.inf`) is assigned at install time and
 changes between installs, so uninstall finds it by scanning
 `pnputil /enum-drivers` for the original filename — which also catches a
 package staged by `build_driver_package.ps1 -Install` on a dev box.
 
-**Kept, each for its own reason:**
-
-| | Why |
-|---|---|
-| Recordings under `sessions_dir` | Irreplaceable student work, not build output. CLAUDE.md is explicit. An uninstall must never take them. |
-| `config.json` | Holds camera assignments and calibration. A reinstall finding them intact is strictly better. |
-| The IDS peak SDK | Shared — Keeler's Kinexis uses the same install, so removing it could break unrelated software. It has its own uninstaller. |
+**Kept:** `config.json` (a reinstall finding camera assignments and
+calibration intact is strictly better) and the IDS peak SDK (shared —
+Keeler's Kinexis uses the same install, and it has its own uninstaller).
+There is nothing else: recordings never persist.
 
 ## What the technician does next
 
@@ -324,11 +325,10 @@ had Reflex on it and confirm:
 - it installs without prompting for admin,
 - the Desktop shortcut opens the viewer,
 - with no recordings present it shows the picker saying "No recordings in
-  this folder" rather than erroring — a review machine legitimately has
-  no `config.json` and no `%PUBLIC%\Documents\Reflex\sessions`,
+  this folder" rather than erroring — the normal state, since recordings
+  never persist anywhere,
 - **"Open a recording folder…" finds a session copied from elsewhere**
-  (a USB stick, Downloads). This is the path that actually matters on a
-  review machine; the default-folder listing will usually be empty there.
+  (a USB stick, Downloads). This is the only path that matters here.
 - playback, the layout picker and Export all work on that copied session.
 
 Both installers use distinct `AppId`s and install locations, so they

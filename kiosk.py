@@ -120,8 +120,8 @@ def estimate_recording_bytes(
 
 def _existing_ancestor(path: Path) -> Path:
     """Walk up from `path` to the nearest directory that actually exists,
-    so shutil.disk_usage has something to measure before sessions/ is
-    ever created.
+    so shutil.disk_usage has something to measure before the recording
+    buffer is ever created.
     """
     path = path.resolve()
     while not path.exists():
@@ -150,9 +150,9 @@ class PreflightStatus:
     # "waiting for cameras" and "the camera is on but the picture is
     # frozen" need different words and different fixes.
     frozen_cameras: tuple[str, ...] = ()
-    # Set when the disk-space check itself couldn't run -- the configured
-    # sessions_dir is on a drive that isn't there (a removed USB disk, an
-    # offline network share). disk_ok is False alongside it; the UI shows a
+    # Set when the disk-space check itself couldn't run -- the drive the
+    # buffer lives on isn't there, or is unreadable. disk_ok is False
+    # alongside it; the UI shows a
     # "is that drive connected?" message rather than a bogus "0 MB free".
     disk_error: str | None = None
 
@@ -210,6 +210,8 @@ class KioskController:
         # self-describing after a config change -- see recorder.py.
         instrument_labels: dict[str, str] | None = None,
         third_person_label: str | None = None,
+        # Where sessions are written. app.py passes the ephemeral buffer
+        # (session_buffer.py); the default is only a convenience for tests.
         output_root: str | Path = "sessions",
         # Only feeds the disk-space estimate (_estimated_canvas()); the
         # recorder no longer has a canvas. None means "derive from the two
@@ -347,7 +349,7 @@ class KioskController:
             disk_ok = free_bytes >= required_bytes
             disk_error: str | None = None
         except OSError as exc:
-            # The configured sessions_dir is on a drive that isn't present
+            # The buffer's drive isn't present
             # (a removed USB disk, an offline network share). Report it as
             # "not ready" with a reason rather than letting this raise every
             # poll and wedge the kiosk -- at startup it would otherwise be a
@@ -485,7 +487,7 @@ class KioskController:
             self._recorder = self._recorder_factory(instrument_camera, self.selected_instrument)
             self._recorder.start()
         except Exception as exc:
-            # A sessions_dir that can't be created (a technician pointed it
+            # An output_root that can't be created (a technician pointed it
             # at a file, or somewhere unwritable), a full disk, an encoder
             # that won't open. The disk preflight can't see any of these --
             # it measures free space on the nearest *existing* ancestor --

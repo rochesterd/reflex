@@ -169,6 +169,7 @@ tests `<name>.py` and says how in its own docstring.
 | `net2860_init.py` | `START_WRITES`/`STOP_WRITES` — the EM2860 init sequence captured from Keeler's driver and verified by register readback. `STOP_WRITES` is kept only as the record of where the vendor's session ended — nothing replays it, and replaying it at startup was tested harmless (2026-09-13), so the old reason for the split is retired. Picture values live in `PICTURE_DEFAULTS`. Its docstring says how to re-derive it; the capture is gitignored and irreplaceable. |
 | `config.py` | `load_config()` reads `config.json` (template: `config.example.json`), raising `ConfigError` before `QApplication` exists. Default paths split on `is_frozen()`: CWD in dev, `%ProgramData%`/`%PUBLIC%\Documents` when frozen (DECISIONS.md's "Frozen-exe installer built"). `exposure_fps_warnings()` reports, never raises. |
 | `compositor.py` | Aspect-preserving, letterboxed layouts, and `compose_layout()` — the one place deciding which stream goes where. `viewer.py` and `session_export.py` both render through it, so what a student sees is what they export. Called at watch time, never at record time. |
+| `session_buffer.py` | `buffer_root()` (under the user's temp dir) and `clear_buffer()`, which `app.py` calls at start and at exit; `packaging/clear_reflex_buffer.ps1` is the logon sweep for the crash case. Nothing here outlives the app, which is why there is no retention. `clear_buffer()` refuses any path outside temp, so a mis-wired `output_root` can't delete real folders. |
 | `session_format.py` | The on-disk vocabulary of a session (`SESSION_FORMAT_VERSION`, role names, `MANIFEST_NAME`). No imports, so readers don't pull in the writer — which keeps the encoder out of the viewer-only build. |
 | `session_export.py` | `export_session()` — one constant-frame-rate MP4 in a chosen layout. Writes a `.partial.mp4` and moves it into place, so a cancelled or failed export leaves nothing that looks finished; never overwrites a stream file. No Qt. |
 | `session_reader.py` | `Session.load()` (`format_version: 2` only), `list_sessions()` (newest first, skipping unreadable ones), and `SessionPlayer` — per stream, the last frame at or before media time *t*; alignment is by PTS alone. No Qt. |
@@ -183,7 +184,7 @@ tests `<name>.py` and says how in its own docstring.
 | `recorder.py` | Two separate VFR files on one shared clock, no compositing. A `_StreamWriter` per camera drains with `read()`, stamps ms PTS from the session origin, enforces the `recording.fps` ceiling, then remuxes MKV→MP4, verifies, and deletes the MKV. Writes `session.json` v2. See DECISIONS.md's "Recorder/Viewer split" entries. |
 | `kiosk.py` | `KioskController` — the state machine (idle/ready/recording/error): the `select_instrument()` lifecycle, preflight (liveness, **freshness**, disk space), stall and freeze detection, and the session time limit (`MAX_SESSION_MINUTES` — reaching it is a normal stop, and it's the session length the disk preflight budgets for). Freshness (`_frame_signature()`) catches a camera that delivers frames but has stopped *seeing*. No Qt. |
 | `app.py` | The kiosk: a thin PySide6 shell over `KioskController` — the Reflex mark, instrument picker, **Start Recording**, **Stop Recording** (the status line counts up against the session limit), a three-step **Brightness** control (live while recording), **Watch Last Recording** (modal; no browsing of other sessions — DECISIONS.md 2026-09-13; `_with_preview_paused()` stops the preview around them while the cameras keep running). Picker and viewer buttons disable while recording. Owns no decisions. |
-| `settings.py` | Technician tool: per role a device dropdown, a profile dropdown (instrument rows only; auto-selected from the model, Custom always available), the student-facing name (pre-filled from the profile, technician's to change), and Preview (with Auto-Calibrate), then Rescan, a recordings folder, and Save to `config.json`. No hot reload. A separate program from `app.py`. |
+| `settings.py` | Technician tool: per role a device dropdown, a profile dropdown (instrument rows only; auto-selected from the model, Custom always available), the student-facing name (pre-filled from the profile, technician's to change), and Preview (with Auto-Calibrate), then Rescan and Save to `config.json`. No hot reload. A separate program from `app.py`. |
 | `setup.ps1`, `setup_wizard.py` | Developer-machine bootstrap (venv, requirements, IDS runtime check), and its tkinter GUI — tkinter because it runs before PySide6 is installed. Not part of any clinic machine's path; see `SETUP.md`. |
 | `packaging/*.spec` | PyInstaller specs for the three exes. `viewer.spec`'s `excludes` (`ids_peak`, `ids_peak_ipl`, `pygrabber`, `comtypes`) is an assertion: if the viewer ever reaches camera code, the build fails loudly. See `PACKAGING.md`. |
 | `packaging/reflex.iss` | Clinic installer: `app.exe` (Desktop and Start menu), `settings.exe` (Start menu only), the bundled IDS peak installed silently, and the legacy BIO's driver package. No `viewer.exe` — `app.exe` contains the viewer. `AppId` is pinned to `reflex`; changing it orphans existing installs. |
@@ -199,12 +200,14 @@ and `setup.ps1`/`setup_wizard.py` are developer tooling (`SETUP.md`).
 
 ## Recording output
 
-Each recording writes to `<sessions_dir>/<YYYY-MM-DD_HHMM>/`
-(minute-collision gets a `_2`, `_3`, ... suffix rather than overwriting).
-`sessions_dir` defaults to a relative `sessions/` folder in dev/test, or
-`%PUBLIC%\Documents\Reflex\sessions` in a frozen install unless a
-technician picked somewhere else via `settings.py`'s Browse field (see
-`config.py`'s `resolve_default_sessions_dir()`):
+**There is no recordings folder.** Every session holds two students' faces
+and eyes, so the kiosk records into an ephemeral buffer
+(`session_buffer.py`), cleared at app start, at exit, and by a logon task
+for the crash case. What a student keeps is what they **Export**; see
+DECISIONS.md 2026-09-13.
+
+Each recording writes to `<buffer>/<YYYY-MM-DD_HHMM>/` (minute-collision
+gets a `_2`, `_3`, ... suffix rather than overwriting):
 
 - `instrument.mp4`, `third_person.mp4` — one file per camera, at that
   camera's **native resolution**, **variable frame rate**. Nothing is
@@ -215,26 +218,25 @@ technician picked somewhere else via `settings.py`'s Browse field (see
   needn't open a video), and per stream its resolution, frame count,
   dropped frames (gaps in `Frame.index`, not estimated), offsets and
   `verified`. `session_format.py` and `recorder.py` have the full schema.
-- `<layout>.mp4` — only if a student used the Viewer's Export. A rendered
-  single-file composite, not part of the recording; safe to delete.
-- `<role>.mkv` — written live during capture, interruption-safe; exists
-  only as the crash-safe copy. Each stream's `stop()` remuxes it (stream
-  copy, no re-encode) to `<role>.mp4`, verifies that (first frames must
-  actually decode — the dropped-keyframe failure in DECISIONS.md's
-  packet-filter entry — and packet count must match), then deletes the
-  MKV. A stream that fails verification keeps **both** files and is
-  flagged `verified: false`. Never both deleted.
+- `<layout>.mp4` — a composite, if Export wrote one here rather than to a drive.
+- `<role>.mkv` — written live during capture, interruption-safe; the
+  crash-safe copy. Each stream's `stop()` remuxes it (stream copy, no
+  re-encode) to `<role>.mp4`, verifies that (first frames must actually
+  decode — the dropped-keyframe failure in DECISIONS.md's packet-filter
+  entry — and packet count must match), then deletes the MKV. A stream
+  that fails verification keeps **both** and is `verified: false`.
 
 **Synchronization is by timestamp, not by frame pairing.** Every frame's
 PTS in every stream is `Frame.timestamp - clock.origin_monotonic`, on a
 1/1000 time base. Two frames with equal PTS in different files were
 grabbed at the same instant — that is the whole sync story. A slower
-camera (the older BIO at 25fps beside a 30fps third-person) simply has
-fewer frames spanning the same interval; the Viewer holds its last frame
-rather than anything interpolating or duplicating.
+camera (the older BIO at 25fps beside a 30fps third-person) has fewer
+frames spanning the same interval; the Viewer holds its last frame rather
+than interpolating or duplicating.
 
-Everything under `sessions_dir` (gitignored as `sessions/` in dev) is the
-deliverable handed to a student — data, never something to regenerate.
+A session in the buffer is still irreplaceable *while it is there*: none
+may be deleted out from under a student who hasn't exported it, and closing
+says so rather than discarding silently (`app.py`'s `_unexported_session()`).
 
 ## Environment
 

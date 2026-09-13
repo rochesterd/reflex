@@ -35,63 +35,45 @@ diagnosis-only, per CLAUDE.md's "loud and early".
 
 ---
 
-## 2026-09-13 — An ephemeral buffer, not a sessions folder
+## 2026-09-13 — Where exported recordings should ultimately go
 
-**Every recording contains two students** — the one performing and the peer
-being examined. An eye and a face are PII, so a nickname solves nothing;
-the optional-identifier plan is folded in here.
+The buffer itself is built (DECISIONS 2026-09-13): nothing outlives the
+app, and a student keeps what they Export. **For testing that export goes
+to their own flash drive, which is a stopgap, not the answer** — handing a
+student the file discloses their peer's image to them and takes it outside
+any retention, deletion or breach process NECO governs.
 
-**The goal, decided 2026-09-13:** nothing containing PII outlives the app.
-The kiosk holds a recording only while the student is in front of it, and
-what they take away is a file they exported deliberately. There is no
-sessions folder, no accumulation, and therefore nothing to sweep —
-`retention.py` is already deleted.
+**Intended destination: Panopto.** Institutional systems solve the
+governance half — access control, retention, audit, and an owner. Panopto
+looks the closer fit than Canvas: it is built for *multiple simultaneous
+feeds*, which is exactly what a session is, and its assignment folders give
+each student a space only they and instructors see. Canvas would most
+likely mean one composited file, and students would lose the layout picker
+and independent angles.
 
-### What replaces it
-
-- **A buffer under the user's temp directory**, one folder per session, in
-  place of `%PUBLIC%\Documents\Reflex\sessions`. `sessions_dir`, its
-  Settings field and `resolve_default_sessions_dir()` all go.
-- **Cleared at three moments:** app start, app exit, and — because an app
-  cannot clean up after its own crash — a scheduled task created by the
-  installer, running at logon. That third one is the answer to "what if it
-  crashes and nobody opens it again".
-- **Export becomes the deliverable.** The viewer's Export already renders a
-  composite MP4 with a partial-file discipline; it gains a destination
-  chooser, defaulting to a removable drive. For testing that is a student's
-  own drive; later it is Panopto.
-- **Watch Last Recording is unaffected** — the buffer exists for as long as
-  the app does.
-- **The disk preflight points at the buffer**, so a full temp drive still
-  refuses Start rather than failing mid-session.
-
-### The part that needs care
-
-**A student who does not export loses the recording.** That is the point,
-but it must never be a surprise: say it on Stop, say it again on close, and
-do not let a window close quietly on an unexported session. A student who
-loses a take to a dialog they did not read has been failed by the app, not
-by the policy.
-
-**Export failing is the recoverable case** — no drive, wrong drive, full
-drive. The buffer still holds the session, so the answer is "try again",
-and only closing the app is final.
-
-### Still to confirm with IT, for the Panopto destination
+**Blocking questions for IT, none of them technical for us:**
 
 1. Does NECO have Panopto, and does it cover this use?
 2. Can a kiosk get an API credential, and is a service account acceptable?
-3. What does the assignment-folder permission model allow?
-4. What is the quota, against ~750 MB per 15-minute session?
+3. What does the assignment-folder permission model actually allow?
+4. What is the storage quota? Budget ~0.16 GB per 15-minute session as
+   measured, not the 750 MB the disk preflight reserves.
 
-A service account lands every recording under one identity, which brings
-the identifier question straight back. Panopto is the better fit than
-Canvas: it is built for multiple simultaneous feeds, which is what a
-session is, where Canvas would mean one composited file.
+A service account is simplest but lands every recording under one identity,
+which brings the identifier question straight back. Per-student login at
+the kiosk attributes correctly and is heavier for an unsupervised student.
 
-**Open question worth answering before building:** if recordings never
-persist and students keep exported composites, what is the viewer-only
-installer for? A composite plays in any media player.
+**The engineering is the same either way**, and already half-built: export,
+verify, and only then let the buffer go. Keep the destination pluggable — a
+drive and an upload are the same operation with a different target.
+
+**Still not to be built until this settles:** audio (it adds voices to data
+we cannot place correctly) and any identifier feature (a nickname does not
+make a face less identifying).
+
+**Open question:** if recordings never persist and students keep exported
+composites, what is the viewer-only installer for? A composite plays in any
+media player.
 
 ---
 

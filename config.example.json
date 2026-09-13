@@ -4,6 +4,5 @@
     "bio":       { "kind": "ids", "serial": "4110050487", "label": "BIO" }
   },
   "third_person": { "kind": "uvc", "vid_pid": "32E4:9310", "friendly_name": "HD USB Camera" },
-  "recording": { "fps": 30 },
-  "sessions_dir": "C:\\Users\\Public\\Documents\\Reflex\\sessions"
+  "recording": { "fps": 30 }
 }

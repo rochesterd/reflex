@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 
 from app_icon import ICON_VIEWER, icon_path
 from compositor import LAYOUT_MODES, LAYOUT_TITLES, compose_layout
-from config import ConfigError, load_config, resolve_default_sessions_dir
+from session_buffer import default_export_dir
 from qt_image import bgr_to_pixmap
 import reflex_style
 from session_export import ExportCancelled, default_export_name, export_session
@@ -120,9 +120,13 @@ class ViewerDialog(QDialog):
     "settings.py Preview leaked the IDS device" entry is about.
     """
 
-    def __init__(self, session: Session, parent=None):
+    def __init__(self, session: Session, parent=None, on_export=None):
         super().__init__(parent)
         self.session = session
+        # Called with the written path when an export finishes. The kiosk
+        # uses it to tell an exported session from one its buffer is about
+        # to delete (see app.py); standalone viewer.exe passes nothing.
+        self._on_export = on_export
         self.setWindowTitle(f"Recording - {session.directory.name}")
         self.setSizeGripEnabled(True)
 
@@ -274,7 +278,10 @@ class ViewerDialog(QDialog):
 
     def _on_export_clicked(self) -> None:
         layout_mode = self.layout_box.currentData()
-        suggested = self.session.directory / default_export_name(layout_mode)
+        # Deliberately not the session folder: on a kiosk that folder is a
+        # temporary buffer, so saving into it saves nothing. Default to a
+        # removable drive when one is plugged in. See session_buffer.py.
+        suggested = default_export_dir() / default_export_name(layout_mode)
         chosen, _filter = QFileDialog.getSaveFileName(
             self, "Export video", str(suggested), "MP4 video (*.mp4)"
         )
@@ -335,6 +342,8 @@ class ViewerDialog(QDialog):
     def _report_export(self, outcome: dict[str, str], out_path: Path) -> None:
         kind = outcome.get("kind")
         if kind == "done":
+            if self._on_export is not None:
+                self._on_export(Path(outcome["payload"]))
             QMessageBox.information(self, "Export complete", f"Saved to:\n{outcome['payload']}")
         elif kind == "failed":
             QMessageBox.warning(self, "Export failed", outcome["payload"])
@@ -507,9 +516,13 @@ def _release(dialog: QDialog) -> None:
     dialog.deleteLater()
 
 
-def open_session(session_dir: Path | str, parent=None) -> bool:
+def open_session(session_dir: Path | str, parent=None, on_export=None) -> bool:
     """Load and show a session modally, reporting a bad session with a
     dialog rather than a traceback. True if it opened.
+
+    `on_export` is called with the written path each time an export
+    succeeds -- the kiosk's way of learning that a session has been taken
+    somewhere that outlives its buffer.
     """
     try:
         session = Session.load(session_dir)
@@ -517,7 +530,7 @@ def open_session(session_dir: Path | str, parent=None) -> bool:
         QMessageBox.warning(parent, "Can't open this recording", str(exc))
         logger.warning("could not open session %s: %s", session_dir, exc)
         return False
-    dialog = ViewerDialog(session, parent=parent)
+    dialog = ViewerDialog(session, parent=parent, on_export=on_export)
     dialog.resize(*DEFAULT_CANVAS)
     try:
         dialog.exec()
@@ -545,20 +558,6 @@ def browse_sessions(sessions_dir: Path | str, parent=None) -> bool:
     return open_session(chosen, parent=parent)
 
 
-def default_sessions_dir() -> Path:
-    """Where recordings live for this install -- config.json's choice if
-    there is one, else the same default app.py falls back to. A review
-    machine legitimately has no config.json, so a missing one is normal
-    here, not an error."""
-    try:
-        cfg = load_config()
-        if cfg.sessions_dir is not None:
-            return Path(cfg.sessions_dir)
-    except ConfigError as exc:
-        logger.info("no usable config.json (%s); using the default recordings folder", exc)
-    return resolve_default_sessions_dir()
-
-
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841 - keeps Qt alive
@@ -569,7 +568,10 @@ def main() -> int:
 
     if len(sys.argv) > 1:
         return 0 if open_session(Path(sys.argv[1])) else 1
-    return 0 if browse_sessions(default_sessions_dir()) else 1
+    # There is no recordings folder any more -- the kiosk records into a
+    # buffer it deletes (session_buffer.py). Open where a person keeps
+    # files; the picker's "Open a recording folder..." does the rest.
+    return 0 if browse_sessions(Path.home()) else 1
 
 
 if __name__ == "__main__":

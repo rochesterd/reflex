@@ -4972,3 +4972,56 @@ for the crash case, and Export as the only way data leaves the machine.
 Two mechanisms deciding when recordings disappear is how a recording gets
 deleted by the one nobody remembered. This lands in the same commit as the
 plan that replaces it.
+
+## 2026-09-13 — Recordings live in an ephemeral buffer, not a folder
+
+**Decided:** Reflex keeps no recordings. Sessions are written to a buffer
+under the user's temp directory (`session_buffer.py`), cleared at app
+start, at app exit, and by a SYSTEM scheduled task at logon that the
+installer registers (`packaging/clear_reflex_buffer.ps1`). What a student
+keeps is what they Export. `sessions_dir`, `resolve_default_sessions_dir()`
+and settings.py's recordings-folder field are gone with it.
+
+**Why:** every recording contains two students — the one performing and
+the peer being examined — and an eye and a face are PII under FERPA. A
+folder of recordings on a shared kiosk is a disclosure waiting for whoever
+opens it next; removing the browse button (this date) stopped students
+seeing each other's sessions but left the pile. Nothing accumulating is a
+stronger property than anything accumulating carefully.
+
+**Why three clearing moments, not one:** start and exit cover the normal
+case, but an app cannot clean up after its own crash, and "it gets cleaned
+when someone next runs the app" leaves a gap of unbounded length. The logon
+task is the only one that closes it without the app running.
+
+**Why not RAM.** Measured: a real session is ~1.4 Mbps, about 0.16 GB per
+15 minutes — small enough to hold in memory. Rejected anyway. Windows'
+pagefile and hibernation write RAM to disk, so "volatile" isn't, while
+BitLocker (on by default on these machines) protects a temp file just as
+well. An out-of-memory condition would destroy an irreplaceable
+in-progress capture, which CLAUDE.md forbids; and a RAM disk means a
+third-party kernel driver needing IT approval.
+
+**Why the export default is a removable drive:** the session folder was
+the old suggestion, and on a kiosk that folder is about to be deleted —
+suggesting it would suggest saving nowhere. `default_export_dir()` picks
+the first removable drive, falling back to home.
+
+**The risk this creates, and what answers it:** a student who does not
+export loses their recording. That is the point, but it must never be a
+surprise, so the summary line says NOT saved yet until an export succeeds,
+and closing with an unexported session asks first
+(`app.py`'s `_unexported_session()`). Export failing is recoverable — the
+buffer still holds the session; only closing is final.
+
+**`clear_buffer()` refuses any path outside temp.** It deletes folders
+outright, so being pointed somewhere real is the one thing that must never
+happen. The guard caught exactly this in the test suite, where the default
+`output_root` is a literal `sessions`.
+
+**Still open:** where recordings should ultimately go (Panopto, pending
+four questions for IT — ROADMAP), and what the viewer-only installer is
+for now that nothing persists.
+
+---
+

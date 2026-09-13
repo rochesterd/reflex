@@ -46,20 +46,6 @@ def resolve_default_config_path() -> Path:
     return Path("config.json")
 
 
-def resolve_default_sessions_dir() -> Path:
-    """Public Documents, not ProgramData: unlike config.json, a session
-    recording is the actual deliverable a technician goes and retrieves
-    for a student (see CLAUDE.md), so it needs to be somewhere visible in
-    Explorer by default, not a hidden system folder. Only used as the
-    pre-filled default in settings.py's Browse field and as app.py's
-    fallback when config.json doesn't set `sessions_dir` explicitly --
-    once a technician saves a choice, that explicit value always wins.
-    """
-    if is_frozen():
-        return Path(os.environ["PUBLIC"]) / "Documents" / "Reflex" / "sessions"
-    return Path("sessions")
-
-
 DEFAULT_CONFIG_PATH = resolve_default_config_path()
 
 
@@ -142,11 +128,6 @@ class AppConfig:
     instruments: dict[str, InstrumentConfig]
     third_person: ThirdPersonConfig
     recording: RecordingConfig
-    # None means "caller decides the default" (resolve_default_sessions_dir()),
-    # not an error -- same optional-with-fallback shape as `recording`,
-    # and for the same reason: every config.json written before this field
-    # existed is still valid.
-    sessions_dir: Path | None = None
 
 
 def achievable_fps(exposure_time_us: float) -> float:
@@ -207,13 +188,11 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
     third_person = _parse_third_person(path, third_person_raw)
 
     recording = _parse_recording(path, raw.get("recording"))
-    sessions_dir = _parse_sessions_dir(path, raw.get("sessions_dir"))
 
     config = AppConfig(
         instruments=instruments,
         third_person=third_person,
         recording=recording,
-        sessions_dir=sessions_dir,
     )
     for message in exposure_fps_warnings(config):
         logger.warning("%s: %s", path, message)
@@ -381,16 +360,6 @@ def _parse_recording(path: Path, entry: object) -> RecordingConfig:
         raise ConfigError(f"{path}: recording.fps must be a positive whole number. {_FIX_HINT}")
 
     return RecordingConfig(fps=int(fps))
-
-
-def _parse_sessions_dir(path: Path, entry: object) -> Path | None:
-    # Optional, like `recording` above: absent means "caller decides the
-    # default" via resolve_default_sessions_dir(), not a broken config.
-    if entry is None:
-        return None
-    if not isinstance(entry, str) or not entry:
-        raise ConfigError(f"{path}: 'sessions_dir' must be a non-empty string. {_FIX_HINT}")
-    return Path(entry)
 
 
 def _positive_int(path: Path, field_name: str, value: object) -> int:

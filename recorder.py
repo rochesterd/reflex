@@ -501,7 +501,7 @@ class Recorder:
                 writer.abandon()
             self._writers = []
             # Remove the directory just created if nothing landed in it: a
-            # repeated failed Start would otherwise litter sessions_dir with
+            # repeated failed Start would otherwise litter the buffer with
             # empty folders, which nothing else would clean up
             # (no session.json means "a failed session a technician should
             # look at").

@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
-    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -49,7 +48,6 @@ from config import (
     DEFAULT_RECORDING_FPS,
     ConfigError,
     load_config,
-    resolve_default_sessions_dir,
 )
 from qt_image import bgr_to_pixmap
 from uvc_camera import UvcCamera
@@ -845,21 +843,10 @@ class SettingsWindow(QMainWindow):
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
 
-        # Not a per-role DeviceRow: this is where recordings land, not a
-        # camera. Pre-filled with the resolved default so it's always a
-        # valid value even if the technician never touches it -- see
-        # config.py's resolve_default_sessions_dir().
-        self.sessions_dir_title = QLabel("Recordings folder")
-        self.sessions_dir_title.setMinimumWidth(90)
-        self.sessions_dir_edit = QLineEdit(str(resolve_default_sessions_dir()))
-        self.sessions_dir_edit.setReadOnly(True)
-        self.sessions_dir_browse_button = QPushButton("Browse...")
-        self.sessions_dir_browse_button.clicked.connect(self._on_browse_sessions_dir)
-        sessions_dir_row = QHBoxLayout()
-        sessions_dir_row.addWidget(self.sessions_dir_title)
-        sessions_dir_row.addWidget(self.sessions_dir_edit)
-        sessions_dir_row.addWidget(self.sessions_dir_browse_button)
-
+        # There is deliberately no recordings folder to choose. Sessions
+        # go to a buffer the app deletes (session_buffer.py), and a
+        # technician pointing that somewhere permanent would quietly undo
+        # the reason it exists.
 
         layout = QVBoxLayout()
         layout.addWidget(self.warning_label)
@@ -868,8 +855,6 @@ class SettingsWindow(QMainWindow):
         for row in self._all_rows():
             layout.addWidget(row)
             row.changed.connect(self._update_save_enabled)
-        layout.addLayout(sessions_dir_row)
-
         buttons = QHBoxLayout()
         buttons.addWidget(self.rescan_button)
         buttons.addWidget(self.save_button)
@@ -909,8 +894,6 @@ class SettingsWindow(QMainWindow):
                 row.set_pending_selection(pending_key)
                 row.set_calibration(inst.exposure_time_us, inst.gain)
         self._third_person_row.set_pending_selection(cfg.third_person.vid_pid)
-        if cfg.sessions_dir is not None:
-            self.sessions_dir_edit.setText(str(cfg.sessions_dir))
         self._recording_fps = cfg.recording.fps
         for row in self._instrument_rows.values():
             row.target_fps = cfg.recording.fps
@@ -955,11 +938,6 @@ class SettingsWindow(QMainWindow):
         except Exception as exc:
             logger.warning("could not enumerate webcams: %s", exc)
             return [], f"Could not enumerate webcams: {exc}"
-
-    def _on_browse_sessions_dir(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Choose recordings folder", self.sessions_dir_edit.text())
-        if chosen:
-            self.sessions_dir_edit.setText(chosen)
 
     def _duplicate_serial_roles(self) -> dict[str, list[str]]:
         """Serials currently selected by more than one instrument row --
@@ -1103,7 +1081,10 @@ class SettingsWindow(QMainWindow):
             "vid_pid": third_person_candidate.key,
             "friendly_name": third_person_candidate.source.name,
         }
-        data["sessions_dir"] = self.sessions_dir_edit.text()
+        # Keys the app no longer honours, so a config written before the
+        # ephemeral buffer stops carrying settings that do nothing.
+        for dead_key in ("sessions_dir", "retention"):
+            data.pop(dead_key, None)
 
         self.config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         self.status_label.setText(f"Saved to {self.config_path}. Restart app.py to apply.")

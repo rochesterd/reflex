@@ -169,6 +169,9 @@ class TestCloseLockdown(unittest.TestCase):
             window.controller.poll_preflight()
             window.controller.start_recording()
             window._confirm_stop_and_exit = lambda: True
+            # The session that stop produces is unexported by definition;
+            # TestUnexportedSessionOnClose covers that prompt on its own.
+            window._confirm_discard_unexported = lambda: True
 
             event = QCloseEvent()
             window.closeEvent(event)
@@ -192,6 +195,74 @@ class TestCloseLockdown(unittest.TestCase):
         finally:
             third_person.stop()
             instruments["slit_lamp"].stop()
+
+
+class TestUnexportedSessionOnClose(unittest.TestCase):
+    """Closing deletes the buffer, so a session nobody exported is about
+    to be lost. That must never be silent: the student is told, and can go
+    back and export. See session_buffer.py and ROADMAP's ephemeral-buffer
+    entry.
+
+    _confirm_discard_unexported() is monkeypatched for the same reason
+    _confirm_stop_and_exit() is -- a real QMessageBox blocks headlessly.
+    """
+
+    def _window(self):
+        third_person = SyntheticCamera(160, 120, fps=30)
+        instruments = {"slit_lamp": SyntheticCamera(160, 120, fps=30)}
+        window = KioskWindow(third_person, instruments)
+        self.addCleanup(instruments["slit_lamp"].stop)
+        self.addCleanup(third_person.stop)
+        return window
+
+    def test_close_is_ignored_when_the_student_wants_to_export_first(self):
+        window = self._window()
+        window.controller.last_session_dir = Path("buffer") / "2026-01-01_1200"
+        window._confirm_discard_unexported = lambda: False
+
+        event = QCloseEvent()
+        window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+
+    def test_close_proceeds_once_the_student_accepts_losing_it(self):
+        window = self._window()
+        window.controller.last_session_dir = Path("buffer") / "2026-01-01_1200"
+        window._confirm_discard_unexported = lambda: True
+
+        event = QCloseEvent()
+        window.closeEvent(event)
+
+        self.assertTrue(event.isAccepted())
+
+    def test_an_exported_session_closes_without_a_prompt(self):
+        window = self._window()
+        session_dir = Path("buffer") / "2026-01-01_1200"
+        window.controller.last_session_dir = session_dir
+        window._on_exported(session_dir / "side_by_side.mp4")
+
+        def refuse():
+            raise AssertionError("an exported session must not prompt")
+
+        window._confirm_discard_unexported = refuse
+
+        event = QCloseEvent()
+        window.closeEvent(event)
+
+        self.assertTrue(event.isAccepted())
+
+    def test_the_summary_says_the_recording_is_not_saved_yet(self):
+        window = self._window()
+        window.controller.last_session_dir = Path("buffer") / "2026-01-01_1200"
+        info = {"streams": {"instrument": {"frame_count": 10, "dropped_frames": 0, "verified": True}}}
+
+        summary = window._format_summary("Session complete", info)
+        self.assertIn("NOT saved yet", summary)
+        # The buffer path is never shown: it is about to be deleted.
+        self.assertNotIn("2026-01-01_1200", summary)
+
+        window._on_exported(Path("buffer") / "2026-01-01_1200" / "out.mp4")
+        self.assertIn("saved to your drive", window._format_summary("Session complete", info))
 
 
 class TestWatchButton(unittest.TestCase):

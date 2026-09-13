@@ -44,7 +44,6 @@ from config import (
     InstrumentConfig,
     is_frozen,
     load_config,
-    resolve_default_sessions_dir,
 )
 from device_presets import CUSTOM_PROFILE_ID, profile_for_id
 from kiosk import KioskController, PreflightStatus, State
@@ -52,6 +51,7 @@ from neco_reflex_theme import BURGUNDY_BGR
 from qt_image import bgr_to_pixmap
 from reflex_mark import ReflexMark
 import reflex_style
+from session_buffer import buffer_root, clear_buffer
 from synthetic_camera import SyntheticCamera
 from uvc_camera import UvcCamera
 from viewer import open_session
@@ -84,9 +84,9 @@ _INSTRUMENT_PLACEHOLDER = np.zeros(
     (PREVIEW_CANVAS_SIZE[1], PREVIEW_CANVAS_SIZE[0] // 2, 3), dtype=np.uint8
 )
 
-# See config.py's resolve_default_config_path()/resolve_default_sessions_dir()
-# for why this needs the same frozen/dev split -- a frozen install has no
-# repo checkout for "logs" to be relative to.
+# See config.py's resolve_default_config_path() for why this needs the
+# same frozen/dev split -- a frozen install has no repo checkout for
+# "logs" to be relative to.
 LOG_DIR = Path(os.environ["ProgramData"]) / "Reflex" / "logs" if is_frozen() else Path("logs")
 LOG_FILE = LOG_DIR / "app.log"
 
@@ -168,6 +168,11 @@ class KioskWindow(QMainWindow):
         # camera-retry timer instead of silently reverting to "nothing
         # selected."
         self._desired_instrument: str | None = None
+        # Session folders the student has exported out of the buffer. The
+        # buffer is wiped on exit, so an un-exported session is one that is
+        # about to be lost -- this is what lets closing say so. See
+        # session_buffer.py.
+        self._exported: set[Path] = set()
 
         # The mark doubles as the recording indicator: its pupil opens
         # while recording (see _sync_ui). It takes no clicks or focus.
@@ -372,7 +377,7 @@ class KioskWindow(QMainWindow):
         self.summary_label.clear()
         self.controller.start_recording()
         if self.controller.state == State.ERROR:
-            # The recorder couldn't start (an uncreatable sessions_dir, a
+            # The recorder couldn't start (an uncreatable buffer folder, a
             # full disk). Say so -- otherwise Start just appears inert.
             self._show_error()
         self._sync_ui()
@@ -394,7 +399,15 @@ class KioskWindow(QMainWindow):
         session_dir = self.controller.last_session_dir
         if session_dir is None or self.controller.state == State.RECORDING:
             return
-        self._with_preview_paused(lambda: open_session(session_dir, parent=self))
+        self._with_preview_paused(
+            lambda: open_session(session_dir, parent=self, on_export=self._on_exported)
+        )
+        self._sync_ui()
+
+    def _on_exported(self, _out_path: Path) -> None:
+        """The student saved this session somewhere that outlives the app."""
+        if self.controller.last_session_dir is not None:
+            self._exported.add(Path(self.controller.last_session_dir))
 
     def _with_preview_paused(self, action) -> None:
         """Run a modal viewer with the live preview paused.
@@ -552,8 +565,40 @@ class KioskWindow(QMainWindow):
                 note = ""
             parts.append(f"{label}: {stream['frame_count']} frames, {stream['dropped_frames']} dropped{note}")
         if self.controller.last_session_dir is not None:
-            parts.append(f"saved to {self.controller.last_session_dir}")
+            # Never the buffer path: a folder that is about to be deleted
+            # is not somewhere to send a student. Say what they must do
+            # instead. See session_buffer.py.
+            if Path(self.controller.last_session_dir) in self._exported:
+                parts.append("saved to your drive")
+            else:
+                parts.append(
+                    "NOT saved yet - press Watch Last Recording, then Export video, "
+                    "to save it to your drive"
+                )
         return "  |  ".join(parts)
+
+    def _unexported_session(self) -> Path | None:
+        """The session that closing would destroy, if there is one."""
+        session_dir = self.controller.last_session_dir
+        if session_dir is None:
+            return None
+        session_dir = Path(session_dir)
+        return None if session_dir in self._exported else session_dir
+
+    def _confirm_discard_unexported(self) -> bool:
+        # Split out from closeEvent() for the same reason as
+        # _confirm_stop_and_exit(): tests monkeypatch it.
+        reply = QMessageBox.question(
+            self,
+            "This recording hasn't been saved",
+            "Your recording has not been saved to a drive yet, and closing "
+            "Reflex deletes it permanently.\n\n"
+            "Press Watch Last Recording, then Export video, to save it first.\n\n"
+            "Close Reflex and delete the recording?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def _confirm_stop_and_exit(self) -> bool:
         # Split out from closeEvent() so tests can monkeypatch this instead
@@ -582,6 +627,12 @@ class KioskWindow(QMainWindow):
             except Exception:
                 logger.exception("stop_recording() failed during confirmed close")
 
+        unexported = self._unexported_session()
+        if unexported is not None and not self._confirm_discard_unexported():
+            logger.info("close declined: %s has not been exported", unexported)
+            event.ignore()
+            return
+
         self.preview_timer.stop()
         self.poll_timer.stop()
         self.camera_retry_timer.stop()
@@ -589,6 +640,9 @@ class KioskWindow(QMainWindow):
         if self.controller.selected_instrument is not None:
             self.instruments[self.controller.selected_instrument].stop()
         super().closeEvent(event)
+        # Last, and after the cameras are down: whatever is still in the
+        # buffer is what the student chose not to take with them.
+        clear_buffer(self.controller.output_root)
 
 
 def _resolve_presets(inst: InstrumentConfig, name: str) -> tuple[str | None, int | None, float | None]:
@@ -748,7 +802,11 @@ def main() -> int:
         cfg.third_person.vid_pid, third_person_synthetic, "third-person", target_fps=cfg.recording.fps
     )
     instrument_labels = {key: inst.label for key, inst in cfg.instruments.items()}
-    output_root = cfg.sessions_dir if cfg.sessions_dir is not None else resolve_default_sessions_dir()
+    # Anything still here belongs to a session that crashed or was killed
+    # -- clear it before recording rather than after, so a machine that is
+    # never closed cleanly still starts each day empty.
+    output_root = buffer_root()
+    clear_buffer(output_root)
 
     window = KioskWindow(
         third_person,
