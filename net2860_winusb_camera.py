@@ -50,7 +50,7 @@ import cv2
 import numpy as np
 
 from camera import ORIENTATION_NONE, BaseCamera
-from net2860_init import START_WRITES, STOP_WRITES
+from net2860_init import PICTURE_DEFAULTS, PICTURE_REGISTERS, START_WRITES
 from winusb import IsochReader, WinUsbDevice, WinUsbError
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,7 @@ class Net2860WinUsbCamera(BaseCamera):
         label: str = "bio-legacy",
         queue_size: int = 2,
         orientation: str | None = ORIENTATION_NONE,
+        picture: dict[str, int] | None = None,
         alt: int = DEFAULT_ALT,
         packets_per_transfer: int = 64,
         transfer_depth: int = 8,
@@ -125,6 +126,11 @@ class Net2860WinUsbCamera(BaseCamera):
         # consumer sees it identically.
         super().__init__(queue_size=queue_size, label=label, orientation=orientation)
         self._alt = alt
+        # The bridge's video processing. Defaults are Keeler's own values,
+        # adopted deliberately -- see net2860_init.PICTURE_DEFAULTS.
+        self._picture = dict(PICTURE_DEFAULTS)
+        if picture:
+            self._picture.update(picture)
         self._packets = packets_per_transfer
         self._depth = transfer_depth
         self._dev: WinUsbDevice | None = None
@@ -154,6 +160,7 @@ class Net2860WinUsbCamera(BaseCamera):
 
         try:
             _replay(self._dev, START_WRITES)
+            self._apply_picture()
             self._dev.set_alt(self._alt)
             self._start_stream()
         except Exception:
@@ -188,13 +195,33 @@ class Net2860WinUsbCamera(BaseCamera):
         if self._dev is not None:
             try:
                 self._dev.set_alt(0)  # release the isochronous bandwidth
-                _replay(self._dev, STOP_WRITES)
             except Exception:
                 # Best-effort: we are closing anyway, and a device that has
                 # already been unplugged cannot be told to stop.
                 pass
             self._dev.close()
             self._dev = None
+
+    def _apply_picture(self) -> None:
+        """Set the bridge's picture registers after the captured bring-up.
+
+        START_WRITES touches these too, mid-sequence; writing them again
+        here is what makes the values *ours* rather than whatever the
+        capture happened to leave. Each is one control transfer, verified by
+        reading it straight back -- the same protocol the vendor driver
+        used, and the readback is how a masked field (contrast and
+        saturation ignore bits above 0x1f) shows up instead of silently
+        misbehaving.
+        """
+        for name, value in self._picture.items():
+            register = PICTURE_REGISTERS[name]
+            self._dev.control(0x40, 0x01, value, register, data=bytes([value]))
+            got = self._dev.control(0xC0, 0x00, 0, register, length=1)[0]
+            if got != value:
+                logger.warning(
+                    "%s: %s (register 0x%02x) set to 0x%02x but reads 0x%02x",
+                    self.label, name, register, value, got,
+                )
 
     # ---------------------------------------------------------------- grab
 

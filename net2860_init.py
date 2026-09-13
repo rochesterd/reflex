@@ -13,11 +13,13 @@ the trailing pair as part of startup switches the bridge straight back
 off. START_WRITES is what brings the camera up; STOP_WRITES is what the
 vendor driver sends on the way down.
 
-That reason is now suspect: those four are the bridge's picture registers
-(brightness, contrast, saturation, sharpness -- Linux em28xx-reg.h), which
-cannot switch a bridge off, so whatever broke startup was something else.
-The split stays because it is what hardware verified; re-derive the
-explanation before relying on it. See DECISIONS.md's 2026-09-11 entry.
+That reason was wrong, tested on hardware 2026-09-13: replaying
+START + STOP together streams perfectly, and so does a normal start
+afterwards. Those four are the bridge's picture registers, which cannot
+switch a bridge off. STOP_WRITES is kept only as the record of where the
+vendor's session ended; nothing replays it now -- PICTURE_DEFAULTS below is
+where those values live, chosen rather than inherited. See DECISIONS.md's
+2026-09-13 entry.
 
 To re-derive it: the capture is vendor/net2860_driver/capture/bio_all.pcap,
 which is gitignored -- not in the repo, and the vendor driver that produced
@@ -96,3 +98,37 @@ STOP_WRITES = [
     ( 0.955, 0x22, 0x0f),
     ( 0.955, 0x25, 0x02),
 ]
+
+
+# The EM2860's own video processing, confirmed on hardware 2026-09-13 by
+# sweeping each one on a live stream (DECISIONS.md). Names are Linux
+# em28xx-reg.h's; the behaviour is ours, measured:
+#
+#   0x20 contrast    5-bit gain, 0x10 = unity. 0x08 halved the frame mean.
+#                    Bits above the field are masked: 0x20 reads back 0x00.
+#   0x21 brightness  signed offset. 0x00/0x08/0x20/0x40 gave means of
+#                    77/86/114/151.
+#   0x22 saturation  5-bit gain, same masking. 0x00 is monochrome.
+#   0x23 blue, 0x24 red  signed colour-balance offsets.
+#   0x25 sharpness   edge enhancement; subtle, moves p95 without the mean.
+PICTURE_REGISTERS = {
+    "contrast": 0x20,
+    "brightness": 0x21,
+    "saturation": 0x22,
+    "blue_balance": 0x23,
+    "red_balance": 0x24,
+    "sharpness": 0x25,
+}
+
+# Keeler's own values, which is where the vendor's session *ended* -- the
+# trailing writes this file used to treat as a shutdown sequence. Adopted
+# deliberately as the starting point (someone chose them with the
+# instrument in front of them), not inherited by accident.
+PICTURE_DEFAULTS = {
+    "contrast": 0x10,
+    "brightness": 0x08,
+    "saturation": 0x0F,
+    "blue_balance": 0x00,
+    "red_balance": 0x00,
+    "sharpness": 0x02,
+}

@@ -20,6 +20,7 @@ import unittest
 import numpy as np
 
 import net2860_winusb_camera as m
+from net2860_init import PICTURE_REGISTERS
 from camera import ORIENTATION_NONE
 from winusb import GUID
 
@@ -157,6 +158,62 @@ class GuidTests(unittest.TestCase):
         a = GUID.from_string("{CE873099-195F-4601-9800-F9748A92CB41}")
         b = GUID.from_string("CE873099-195F-4601-9800-F9748A92CB41")
         self.assertEqual(bytes(memoryview(a)), bytes(memoryview(b)))
+
+
+class PictureRegisterTests(unittest.TestCase):
+    """_apply_picture() writes the bridge's video-processing registers and
+    reads each back. No hardware: the device is a dict with a control()."""
+
+    class _FakeDevice:
+        def __init__(self, masks=None):
+            self.registers = {}
+            self.masks = masks or {}
+
+        def control(self, bm_request_type, b_request, w_value, w_index, data=None, length=0):
+            if bm_request_type == 0x40:  # register write
+                self.registers[w_index] = data[0] & self.masks.get(w_index, 0xFF)
+                return b""
+            return bytes([self.registers.get(w_index, 0)])  # register read
+
+    def _camera(self, picture=None):
+        # __init__ touches no hardware; the device is supplied directly.
+        camera = m.Net2860WinUsbCamera(label="test", picture=picture)
+        camera._dev = self._FakeDevice()
+        return camera
+
+    def test_keeler_defaults_are_written(self):
+        camera = self._camera()
+        camera._apply_picture()
+
+        self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["contrast"]], 0x10)
+        self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["brightness"]], 0x08)
+        # 0x0f, where the vendor's own session ended -- not the 0x10 its
+        # mid-sequence left behind. See DECISIONS.md 2026-09-13.
+        self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["saturation"]], 0x0F)
+
+    def test_an_override_replaces_only_what_it_names(self):
+        camera = self._camera(picture={"brightness": 0x20})
+        camera._apply_picture()
+
+        self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["brightness"]], 0x20)
+        self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["contrast"]], 0x10)
+
+    def test_every_named_register_is_written(self):
+        camera = self._camera()
+        camera._apply_picture()
+
+        self.assertEqual(set(camera._dev.registers), set(PICTURE_REGISTERS.values()))
+
+    def test_a_masked_field_warns_rather_than_passing_silently(self):
+        """Contrast and saturation ignore bits above 0x1f -- measured, not
+        assumed -- so a value that cannot land must say so."""
+        camera = self._camera(picture={"contrast": 0x30})
+        camera._dev = self._FakeDevice(masks={PICTURE_REGISTERS["contrast"]: 0x1F})
+
+        with self.assertLogs("net2860_winusb_camera", level="WARNING") as logs:
+            camera._apply_picture()
+
+        self.assertIn("contrast", "".join(logs.output))
 
 
 if __name__ == "__main__":

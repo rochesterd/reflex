@@ -4684,3 +4684,40 @@ first: it does not persist across opens, and `PixelFormat` still reports
 `BayerRG8` when mirrored, so whether the colour-filter phase shift is
 compensated is untested. A wrong answer there is wrong colour, not a wrong
 orientation.
+
+---
+
+## 2026-09-13 - The legacy BIO's picture registers, confirmed and taken over
+
+Swept each register on a live stream with the camera attached, measuring
+the frame after every write and reading the value straight back.
+
+| register | what it does, measured |
+|---|---|
+| `0x20` contrast | 5-bit gain, `0x10` = unity. `0x08` halved the frame mean (86 -> 47). |
+| `0x21` brightness | signed offset: `0x00`/`0x08`/`0x20`/`0x40` gave means 77/86/114/151. |
+| `0x22` saturation | 5-bit gain. `0x00` produces a **monochrome** frame. |
+| `0x23`/`0x24` | blue and red balance offsets. |
+| `0x25` sharpness | edge enhancement: moves p95 (118 -> 121) without the mean. |
+
+Linux `em28xx-reg.h`'s map is therefore right about this board. It is also
+incomplete in a way that matters: **contrast and saturation mask off bits
+above `0x1f`**, so `0x20` reads back as `0x00` and `0x30` as `0x10`. A
+value that cannot land now logs a warning instead of passing silently,
+which the readback makes free.
+
+**The START/STOP split's stated reason was wrong.** Replaying
+`START_WRITES + STOP_WRITES` together streams perfectly, and a normal start
+afterwards still works -- tested three ways round. Whatever broke the spike
+that day, it was not those four writes, which are picture registers and
+cannot stop a bridge. `STOP_WRITES` is kept as the record of where the
+vendor's session ended; nothing replays it.
+
+**So the values are now ours rather than inherited.** `PICTURE_DEFAULTS`
+holds Keeler's own numbers -- including saturation `0x0f`, where their
+session actually ended, rather than the `0x10` the mid-capture left behind,
+a difference this repo has been shipping unknowingly. `Net2860WinUsbCamera`
+applies them after the bring-up sequence and takes a `picture=` override.
+Adopting the vendor's numbers deliberately is the outcome the ROADMAP entry
+said to expect: someone chose them with the instrument in front of them.
+What changed is that we now know what each one does, and can move them.
