@@ -27,6 +27,7 @@ import logging
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,27 @@ BUFFER_DIR_NAME = "Reflex"
 BUFFER_SUBDIR = "buffer"
 
 _DRIVE_REMOVABLE = 2
+# GetVolumeInformationW's lpVolumeNameBuffer, per MSDN: a volume label is
+# at most MAX_PATH (260) characters plus the terminator.
+_VOLUME_NAME_MAX = 261
+
+
+@dataclass(frozen=True)
+class Drive:
+    """A removable drive, as a student would recognise it."""
+
+    path: Path
+    label: str  # the volume label, "" if the drive has none
+    free_bytes: int | None  # None if the drive would not answer
+
+    def describe(self) -> str:
+        """What to show in a chooser. The letter is always present and
+        always unique, so two identically-labelled sticks stay tellable
+        apart -- which is the whole reason the chooser exists."""
+        name = f"{self.label} ({self.path.drive})" if self.label else str(self.path)
+        if self.free_bytes is None:
+            return name
+        return f"{name} - {self.free_bytes / 1e9:.1f} GB free"
 
 
 def buffer_root() -> Path:
@@ -121,6 +143,37 @@ def removable_drives() -> list[Path]:
         if kind == _DRIVE_REMOVABLE:
             drives.append(Path(root))
     return drives
+
+
+def removable_drives_detailed() -> list[Drive]:
+    """Every removable drive with the label and free space a student
+    picks by. A drive that will not answer still appears -- a card reader
+    with no card is worth showing as a wrong choice, not hiding."""
+    drives = []
+    for root in removable_drives():
+        try:
+            free = shutil.disk_usage(str(root)).free
+        except OSError as exc:
+            logger.debug("could not measure %s: %s", root, exc)
+            free = None
+        drives.append(Drive(path=root, label=_volume_label(root), free_bytes=free))
+    return drives
+
+
+def _volume_label(root: Path) -> str:
+    """The drive's own name ("KINGSTON"), or "" if it has none or the
+    call fails. Cosmetic, so every failure is an empty string."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        buffer = ctypes.create_unicode_buffer(_VOLUME_NAME_MAX)
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(str(root)), buffer, len(buffer), None, None, None, None, 0
+        )
+    except (AttributeError, OSError) as exc:
+        logger.debug("could not read the volume label of %s: %s", root, exc)
+        return ""
+    return buffer.value if ok else ""
 
 
 def default_export_dir() -> Path:

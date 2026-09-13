@@ -12,10 +12,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from session_buffer import (
+    Drive,
     buffer_root,
     clear_buffer,
     default_export_dir,
     removable_drives,
+    removable_drives_detailed,
 )
 
 
@@ -108,6 +110,36 @@ class ClearBufferTest(unittest.TestCase):
 
             self.assertEqual(removed, 0)
             self.assertTrue((outside / "2026-01-01_1200").exists())
+
+
+class DriveDescriptionTest(unittest.TestCase):
+    """With two sticks plugged in a student picks by what is written on
+    them, so the description carries the label -- and the drive letter,
+    which is the only part guaranteed to be unique."""
+
+    def test_it_reads_like_the_drive_in_their_hand(self):
+        drive = Drive(path=Path("E:/"), label="KINGSTON", free_bytes=14_200_000_000)
+        self.assertEqual(drive.describe(), "KINGSTON (E:) - 14.2 GB free")
+
+    def test_an_unlabelled_drive_still_names_itself(self):
+        drive = Drive(path=Path("F:/"), label="", free_bytes=None)
+        self.assertEqual(drive.describe(), str(drive.path))
+
+    def test_details_are_gathered_per_drive(self):
+        with patch("session_buffer.removable_drives", return_value=[Path("E:/"), Path("F:/")]):
+            with patch("session_buffer._volume_label", side_effect=["KINGSTON", ""]):
+                with patch("session_buffer.shutil.disk_usage") as usage:
+                    usage.side_effect = [
+                        type("U", (), {"free": 8_000_000_000})(),
+                        OSError("no media"),  # a card reader with no card in it
+                    ]
+                    drives = removable_drives_detailed()
+
+        self.assertEqual([d.path for d in drives], [Path("E:/"), Path("F:/")])
+        self.assertEqual(drives[0].label, "KINGSTON")
+        # A drive that will not answer is still offered: a wrong choice the
+        # student can see beats one that mysteriously isn't listed.
+        self.assertIsNone(drives[1].free_bytes)
 
 
 class ExportDestinationTest(unittest.TestCase):

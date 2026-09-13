@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QInputDialog,
     QProgressDialog,
     QPushButton,
     QSlider,
@@ -45,7 +46,7 @@ from PySide6.QtWidgets import (
 
 from app_icon import ICON_VIEWER, icon_path
 from compositor import LAYOUT_MODES, LAYOUT_TITLES, compose_layout
-from session_buffer import default_export_dir
+from session_buffer import default_export_dir, removable_drives_detailed
 from qt_image import bgr_to_pixmap
 import reflex_style
 from session_export import ExportCancelled, default_export_name, export_session
@@ -278,16 +279,44 @@ class ViewerDialog(QDialog):
 
     def _on_export_clicked(self) -> None:
         layout_mode = self.layout_box.currentData()
-        # Deliberately not the session folder: on a kiosk that folder is a
-        # temporary buffer, so saving into it saves nothing. Default to a
-        # removable drive when one is plugged in. See session_buffer.py.
-        suggested = default_export_dir() / default_export_name(layout_mode)
+        destination = self._choose_destination()
+        if destination is None:
+            return  # the student backed out of the drive chooser
+        suggested = destination / default_export_name(layout_mode)
         chosen, _filter = QFileDialog.getSaveFileName(
             self, "Export video", str(suggested), "MP4 video (*.mp4)"
         )
         if not chosen:
             return
         self._run_export(Path(chosen), layout_mode)
+
+    def _choose_destination(self) -> Path | None:
+        """Which drive the save dialog should open on, or None to abort.
+
+        Deliberately not the session folder: on a kiosk that folder is a
+        temporary buffer, so saving into it saves nothing (session_buffer.py).
+        With one drive plugged in there is no question to ask. With two or
+        more there is a real one -- a student's own stick beside somebody
+        else's, or a card reader -- and picking the first by drive letter
+        would quietly write a peer's recording onto a stranger's drive. The
+        save dialog can still go anywhere; this only decides where it opens.
+        """
+        drives = removable_drives_detailed()
+        if len(drives) < 2:
+            return default_export_dir()
+
+        choices = [drive.describe() for drive in drives]
+        picked, ok = QInputDialog.getItem(
+            self,
+            "Which drive?",
+            "More than one drive is plugged in. Choose yours:",
+            choices,
+            0,
+            False,  # not editable: these are the drives that exist
+        )
+        if not ok:
+            return None
+        return drives[choices.index(picked)].path
 
     def _run_export(self, out_path: Path, layout_mode: str) -> None:
         """Export on a worker thread behind a cancellable progress dialog.

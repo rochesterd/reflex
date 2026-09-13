@@ -50,6 +50,7 @@ from kiosk import KioskController, PreflightStatus, State
 from neco_reflex_theme import BURGUNDY_BGR
 from qt_image import bgr_to_pixmap
 from reflex_mark import ReflexMark
+from session_format import MANIFEST_NAME
 import reflex_style
 from session_buffer import buffer_root, clear_buffer
 from synthetic_camera import SyntheticCamera
@@ -173,6 +174,10 @@ class KioskWindow(QMainWindow):
         # about to be lost -- this is what lets closing say so. See
         # session_buffer.py.
         self._exported: set[Path] = set()
+        # The session the viewer has already been opened on. Stopping opens
+        # it once, not once per poll tick -- stopped_at_time_limit stays set
+        # until the next recording starts.
+        self._reviewed_session: Path | None = None
 
         # The mark doubles as the recording indicator: its pupil opens
         # while recording (see _sync_ui). It takes no clicks or focus.
@@ -237,23 +242,13 @@ class KioskWindow(QMainWindow):
         self.summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.summary_label.setWordWrap(True)
 
-        # Watching is the point of recording -- the student reviews what
-        # they just did while the muscle memory is fresh. Nothing is
-        # rendered to make this possible; the viewer lays the session's two
-        # streams out live. See DECISIONS.md's Recorder/Viewer split entries.
-        self.watch_button = QPushButton("Watch Last Recording")
-        self.watch_button.setMinimumHeight(40)
-        self.watch_button.setEnabled(False)
-        self.watch_button.clicked.connect(self._on_watch_clicked)
-
-        # There is deliberately no "Watch Past Recordings" here. Every
-        # session holds identifiable images of two students and they all
-        # land in one folder, so browsing the list showed any student every
-        # other student's recordings. Watch Last Recording covers the
-        # session a student just made, which is the one they can consent to
-        # seeing. See DECISIONS.md's 2026-09-13 entry and ROADMAP's
-        # recordings-are-PII entry: this comes back when a session belongs
-        # to somebody.
+        # There are deliberately no Watch buttons. Stopping opens the
+        # viewer by itself (_review_last_session), because with an
+        # ephemeral buffer reviewing and exporting is not an optional
+        # extra -- it is the rest of recording, and a student who skips it
+        # has lost the take. Browsing *other* sessions is gone for a
+        # different reason: every session holds two students' faces. See
+        # DECISIONS.md's 2026-09-13 entries.
 
         # The one control a student may touch mid-recording. Three named
         # steps rather than a slider: "brighter" is a judgement they can
@@ -279,7 +274,6 @@ class KioskWindow(QMainWindow):
 
         summary_row = QHBoxLayout()
         summary_row.addWidget(self.summary_label, stretch=1)
-        summary_row.addWidget(self.watch_button)
 
         header = QHBoxLayout()
         header.addWidget(self.mark)
@@ -394,11 +388,31 @@ class KioskWindow(QMainWindow):
             self._show_error()
         else:
             self.summary_label.setText(self._format_summary("Session complete", session_info))
+        self._review_last_session()
 
-    def _on_watch_clicked(self) -> None:
+    def _review_last_session(self) -> None:
+        """Open the session that just finished, without being asked.
+
+        The buffer is deleted when the app closes, so a recording nobody
+        exported is a recording lost. Landing the student in the viewer --
+        the only place Export lives -- is what makes that hard to do by
+        accident, and it is where they wanted to be anyway.
+
+        Skipped when the manifest is missing: finalizing failed badly
+        enough that the viewer has nothing to read, and the error banner is
+        the whole story. See DECISIONS.md's 2026-09-13 entries.
+        """
         session_dir = self.controller.last_session_dir
         if session_dir is None or self.controller.state == State.RECORDING:
             return
+        session_dir = Path(session_dir)
+        if session_dir == self._reviewed_session:
+            return
+        if not (session_dir / MANIFEST_NAME).exists():
+            logger.warning("no %s in %s; not opening the viewer", MANIFEST_NAME, session_dir)
+            return
+
+        self._reviewed_session = session_dir
         self._with_preview_paused(
             lambda: open_session(session_dir, parent=self, on_export=self._on_exported)
         )
@@ -453,6 +467,10 @@ class KioskWindow(QMainWindow):
         else:
             preflight = self.controller.poll_preflight()
         self._sync_ui(preflight)
+        # Covers the stops the student didn't press: the session time limit,
+        # and a mid-recording failure that still finalized a session.
+        if self.controller.state != State.RECORDING:
+            self._review_last_session()
 
     # --- UI reflection --------------------------------------------------
 
@@ -469,10 +487,6 @@ class KioskWindow(QMainWindow):
         for key, button in self._instrument_buttons.items():
             button.setEnabled(state != State.RECORDING)
             button.setChecked(key == self._desired_instrument)
-        self.watch_button.setEnabled(
-            state != State.RECORDING and self.controller.last_session_dir is not None
-        )
-
         if state == State.RECORDING:
             self.status_label.setText(self._recording_status())
         elif state == State.READY:
@@ -583,7 +597,12 @@ class KioskWindow(QMainWindow):
         if session_dir is None:
             return None
         session_dir = Path(session_dir)
-        return None if session_dir in self._exported else session_dir
+        if session_dir in self._exported:
+            return None
+        # A session with no manifest cannot be opened or exported, so
+        # warning about losing it would ask the student to do something
+        # they have no way to do. The error banner already said what broke.
+        return session_dir if (session_dir / MANIFEST_NAME).exists() else None
 
     def _confirm_discard_unexported(self) -> bool:
         # Split out from closeEvent() for the same reason as

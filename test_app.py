@@ -77,6 +77,7 @@ class TestCameraStartFailure(unittest.TestCase):
         instruments = {"slit_lamp": SyntheticCamera(160, 120, fps=30)}
         try:
             window = KioskWindow(third_person, instruments)
+            _quiesce(window)
         except Exception as exc:
             self.fail(f"KioskWindow construction raised instead of degrading: {exc!r}")
         try:
@@ -101,6 +102,7 @@ class TestCameraStartFailure(unittest.TestCase):
         instruments = {"slit_lamp": FailingCamera("no IDS device with serial 'X' found")}
         try:
             window = KioskWindow(third_person, instruments)
+            _quiesce(window)
             window._on_instrument_clicked("slit_lamp")
 
             self.assertIn("slit_lamp", window._camera_start_errors)
@@ -117,6 +119,7 @@ class TestCameraStartFailure(unittest.TestCase):
         instruments = {"slit_lamp": flaky}
         try:
             window = KioskWindow(third_person, instruments)
+            _quiesce(window)
             window._on_instrument_clicked("slit_lamp")
             self.assertIn("slit_lamp", window._camera_start_errors)
 
@@ -141,6 +144,7 @@ class TestCloseLockdown(unittest.TestCase):
         third_person = SyntheticCamera(160, 120, fps=30)
         instruments = {"slit_lamp": SyntheticCamera(160, 120, fps=30)}
         window = KioskWindow(third_person, instruments)
+        _quiesce(window)
         try:
             window._on_instrument_clicked("slit_lamp")
             time.sleep(0.2)  # let both cameras actually produce a frame
@@ -163,6 +167,7 @@ class TestCloseLockdown(unittest.TestCase):
         third_person = SyntheticCamera(160, 120, fps=30)
         instruments = {"slit_lamp": SyntheticCamera(160, 120, fps=30)}
         window = KioskWindow(third_person, instruments)
+        _quiesce(window)
         try:
             window._on_instrument_clicked("slit_lamp")
             time.sleep(0.2)  # let both cameras actually produce a frame
@@ -187,6 +192,7 @@ class TestCloseLockdown(unittest.TestCase):
         third_person = SyntheticCamera(160, 120, fps=30)
         instruments = {"slit_lamp": SyntheticCamera(160, 120, fps=30)}
         window = KioskWindow(third_person, instruments)
+        _quiesce(window)
         try:
             event = QCloseEvent()
             window.closeEvent(event)
@@ -195,6 +201,20 @@ class TestCloseLockdown(unittest.TestCase):
         finally:
             third_person.stop()
             instruments["slit_lamp"].stop()
+
+
+def _quiesce(window) -> None:
+    """Stop a KioskWindow's timers so it stops driving itself.
+
+    A window that outlives its test keeps polling, and a test that forces
+    controller.state (something only start_recording() does for real) makes
+    every later tick raise. Tests that want a tick call _poll_tick()
+    directly. The preview timer is restarted by _with_preview_paused(), so
+    stopping it here doesn't hide anything those tests check.
+    """
+    window.preview_timer.stop()
+    window.poll_timer.stop()
+    window.camera_retry_timer.stop()
 
 
 class TestUnexportedSessionOnClose(unittest.TestCase):
@@ -207,17 +227,27 @@ class TestUnexportedSessionOnClose(unittest.TestCase):
     _confirm_stop_and_exit() is -- a real QMessageBox blocks headlessly.
     """
 
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # A real folder with a real manifest: an unopenable session is
+        # deliberately not warned about, so a fake path would test nothing.
+        self.session_dir = Path(self._tmp.name) / "2026-01-01_1200"
+        self.session_dir.mkdir()
+        (self.session_dir / "session.json").write_text("{}", encoding="utf-8")
+
     def _window(self):
         third_person = SyntheticCamera(160, 120, fps=30)
         instruments = {"slit_lamp": SyntheticCamera(160, 120, fps=30)}
         window = KioskWindow(third_person, instruments)
+        _quiesce(window)
         self.addCleanup(instruments["slit_lamp"].stop)
         self.addCleanup(third_person.stop)
         return window
 
     def test_close_is_ignored_when_the_student_wants_to_export_first(self):
         window = self._window()
-        window.controller.last_session_dir = Path("buffer") / "2026-01-01_1200"
+        window.controller.last_session_dir = self.session_dir
         window._confirm_discard_unexported = lambda: False
 
         event = QCloseEvent()
@@ -227,7 +257,7 @@ class TestUnexportedSessionOnClose(unittest.TestCase):
 
     def test_close_proceeds_once_the_student_accepts_losing_it(self):
         window = self._window()
-        window.controller.last_session_dir = Path("buffer") / "2026-01-01_1200"
+        window.controller.last_session_dir = self.session_dir
         window._confirm_discard_unexported = lambda: True
 
         event = QCloseEvent()
@@ -237,9 +267,8 @@ class TestUnexportedSessionOnClose(unittest.TestCase):
 
     def test_an_exported_session_closes_without_a_prompt(self):
         window = self._window()
-        session_dir = Path("buffer") / "2026-01-01_1200"
-        window.controller.last_session_dir = session_dir
-        window._on_exported(session_dir / "side_by_side.mp4")
+        window.controller.last_session_dir = self.session_dir
+        window._on_exported(self.session_dir / "side_by_side.mp4")
 
         def refuse():
             raise AssertionError("an exported session must not prompt")
@@ -253,7 +282,7 @@ class TestUnexportedSessionOnClose(unittest.TestCase):
 
     def test_the_summary_says_the_recording_is_not_saved_yet(self):
         window = self._window()
-        window.controller.last_session_dir = Path("buffer") / "2026-01-01_1200"
+        window.controller.last_session_dir = self.session_dir
         info = {"streams": {"instrument": {"frame_count": 10, "dropped_frames": 0, "verified": True}}}
 
         summary = window._format_summary("Session complete", info)
@@ -261,109 +290,122 @@ class TestUnexportedSessionOnClose(unittest.TestCase):
         # The buffer path is never shown: it is about to be deleted.
         self.assertNotIn("2026-01-01_1200", summary)
 
-        window._on_exported(Path("buffer") / "2026-01-01_1200" / "out.mp4")
+        window._on_exported(self.session_dir / "out.mp4")
         self.assertIn("saved to your drive", window._format_summary("Session complete", info))
 
 
-class TestWatchButton(unittest.TestCase):
-    """The Watch button opens the just-finished session in the viewer --
-    see DECISIONS.md's Recorder/Viewer split entries. open_session is patched
-    out: what matters here is the gating and that the live preview is
-    paused around it, not the viewer itself (test_viewer.py covers that).
+class TestAutoReview(unittest.TestCase):
+    """Stopping opens the viewer by itself -- there is no Watch button.
+    With an ephemeral buffer, a student who never reaches Export loses the
+    take, so landing them in the viewer is part of recording, not an extra.
+
+    open_session is patched out: what matters here is the gating and that
+    the live preview is paused around it, not the viewer (test_viewer.py).
     """
 
     def _window(self, tmp_root: str) -> tuple[KioskWindow, SyntheticCamera, SyntheticCamera]:
         third_person = SyntheticCamera(160, 120, fps=30)
         instrument = SyntheticCamera(160, 120, fps=30)
         window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+        _quiesce(window)
+        self.addCleanup(instrument.stop)
+        self.addCleanup(third_person.stop)
         return window, third_person, instrument
 
-    def test_disabled_until_a_session_has_been_recorded(self):
+    @staticmethod
+    def _recorded(tmp_root: str, name: str = "2026-01-01_1200") -> Path:
+        """A session folder complete enough for the viewer to open."""
+        session_dir = Path(tmp_root) / name
+        session_dir.mkdir(parents=True)
+        (session_dir / "session.json").write_text("{}", encoding="utf-8")
+        return session_dir
+
+    def test_there_is_no_watch_button(self):
         with tempfile.TemporaryDirectory() as tmp_root:
-            window, third_person, instrument = self._window(tmp_root)
-            try:
-                window._sync_ui(window.controller.poll_preflight())
-                self.assertFalse(window.watch_button.isEnabled())
+            window, _third, _inst = self._window(tmp_root)
+            self.assertFalse(hasattr(window, "watch_button"))
 
-                window.controller.last_session_dir = Path(tmp_root) / "2026-01-01_1200"
-                window._sync_ui(window.controller.poll_preflight())
-                self.assertTrue(window.watch_button.isEnabled())
-            finally:
-                third_person.stop()
-                instrument.stop()
-
-    def test_disabled_while_recording(self):
+    def test_stopping_opens_the_session_and_restarts_the_preview(self):
         with tempfile.TemporaryDirectory() as tmp_root:
-            window, third_person, instrument = self._window(tmp_root)
-            try:
-                window.controller.last_session_dir = Path(tmp_root) / "2026-01-01_1200"
-                window.controller.state = State.RECORDING
-                window._sync_ui()
-                self.assertFalse(window.watch_button.isEnabled())
-            finally:
-                third_person.stop()
-                instrument.stop()
+            window, _third, _inst = self._window(tmp_root)
+            session_dir = self._recorded(tmp_root)
+            window.controller.last_session_dir = session_dir
 
-    def test_clicking_opens_the_session_and_restarts_the_preview(self):
+            with patch("app.open_session") as mock_open:
+                # The live preview must be paused while the modal viewer is
+                # up, and restarted afterwards.
+                mock_open.side_effect = lambda *a, **k: self.assertFalse(
+                    window.preview_timer.isActive()
+                )
+                window._review_last_session()
+
+            mock_open.assert_called_once()
+            self.assertEqual(mock_open.call_args.args[0], session_dir)
+            self.assertTrue(window.preview_timer.isActive())
+
+    def test_the_same_session_is_not_reopened_on_every_poll_tick(self):
+        """stopped_at_time_limit stays set until the next recording starts,
+        so without a guard the poll tick would reopen the viewer forever."""
         with tempfile.TemporaryDirectory() as tmp_root:
-            window, third_person, instrument = self._window(tmp_root)
-            try:
-                session_dir = Path(tmp_root) / "2026-01-01_1200"
-                window.controller.last_session_dir = session_dir
+            window, _third, _inst = self._window(tmp_root)
+            window.controller.last_session_dir = self._recorded(tmp_root)
 
-                with patch("app.open_session") as mock_open:
-                    # The live preview must be paused while the modal
-                    # viewer is up, and restarted afterwards.
-                    mock_open.side_effect = lambda *a, **k: self.assertFalse(
-                        window.preview_timer.isActive()
-                    )
-                    window._on_watch_clicked()
+            with patch("app.open_session") as mock_open:
+                window._review_last_session()
+                window._review_last_session()
+                window._poll_tick()
 
-                mock_open.assert_called_once()
-                self.assertEqual(mock_open.call_args.args[0], session_dir)
-                self.assertTrue(window.preview_timer.isActive())
-            finally:
-                third_person.stop()
-                instrument.stop()
+            mock_open.assert_called_once()
+
+    def test_a_later_session_opens_on_its_own(self):
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window, _third, _inst = self._window(tmp_root)
+
+            with patch("app.open_session") as mock_open:
+                window.controller.last_session_dir = self._recorded(tmp_root, "2026-01-01_1200")
+                window._review_last_session()
+                window.controller.last_session_dir = self._recorded(tmp_root, "2026-01-01_1300")
+                window._review_last_session()
+
+            self.assertEqual(mock_open.call_count, 2)
+
+    def test_a_session_with_no_manifest_is_not_opened(self):
+        """Finalizing failed badly enough that there is nothing to read --
+        the error banner is the whole story, not a second failed dialog."""
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window, _third, _inst = self._window(tmp_root)
+            broken = Path(tmp_root) / "2026-01-01_1200"
+            broken.mkdir()
+
+            window.controller.last_session_dir = broken
+            with patch("app.open_session") as mock_open:
+                window._review_last_session()
+
+            mock_open.assert_not_called()
+            # And nothing warns the student about losing something they
+            # could never have exported.
+            self.assertIsNone(window._unexported_session())
+
+    def test_nothing_opens_while_recording(self):
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window, _third, _inst = self._window(tmp_root)
+            window.controller.last_session_dir = self._recorded(tmp_root)
+            window.controller.state = State.RECORDING
+            self.addCleanup(setattr, window.controller, "state", State.IDLE)
+
+            with patch("app.open_session") as mock_open:
+                window._review_last_session()
+
+            mock_open.assert_not_called()
 
     def test_preview_restarts_even_if_the_viewer_raises(self):
         with tempfile.TemporaryDirectory() as tmp_root:
-            window, third_person, instrument = self._window(tmp_root)
-            try:
-                window.controller.last_session_dir = Path(tmp_root) / "2026-01-01_1200"
-                with patch("app.open_session", side_effect=RuntimeError("boom")):
-                    with self.assertRaises(RuntimeError):
-                        window._on_watch_clicked()
-                self.assertTrue(window.preview_timer.isActive())
-            finally:
-                third_person.stop()
-                instrument.stop()
-
-    def test_does_nothing_when_no_session_has_been_recorded(self):
-        with tempfile.TemporaryDirectory() as tmp_root:
-            window, third_person, instrument = self._window(tmp_root)
-            try:
-                with patch("app.open_session") as mock_open:
-                    window._on_watch_clicked()
-                mock_open.assert_not_called()
-            finally:
-                third_person.stop()
-                instrument.stop()
-
-    def test_the_kiosk_offers_no_way_to_browse_other_sessions(self):
-        """Every session holds two students' faces and they share one
-        folder, so a list of them is a list of other people's recordings.
-        See DECISIONS.md 2026-09-13."""
-        with tempfile.TemporaryDirectory() as tmp_root:
-            window, third_person, instrument = self._window(tmp_root)
-            try:
-                self.assertFalse(hasattr(window, "past_button"))
-                self.assertFalse(hasattr(window, "_on_past_recordings_clicked"))
-                # The one a student just made is still reachable.
-                self.assertTrue(hasattr(window, "watch_button"))
-            finally:
-                third_person.stop()
-                instrument.stop()
+            window, _third, _inst = self._window(tmp_root)
+            window.controller.last_session_dir = self._recorded(tmp_root)
+            with patch("app.open_session", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    window._review_last_session()
+            self.assertTrue(window.preview_timer.isActive())
 
 
 class TestBranding(unittest.TestCase):
@@ -374,6 +416,7 @@ class TestBranding(unittest.TestCase):
         third_person = SyntheticCamera(160, 120, fps=30)
         instrument = SyntheticCamera(160, 120, fps=30)
         window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+        _quiesce(window)
         return window, third_person, instrument
 
     def test_mark_shows_recording_only_while_recording(self):
@@ -426,6 +469,7 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
         instrument = SyntheticCamera(160, 120, fps=30)
         with tempfile.TemporaryDirectory() as tmp_root:
             window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            _quiesce(window)
             try:
                 window.controller.state = State.RECORDING
                 window._sync_ui()
@@ -442,10 +486,10 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
         instrument = SyntheticCamera(160, 120, fps=30)
         with tempfile.TemporaryDirectory() as tmp_root:
             window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            _quiesce(window)
             try:
                 self.assertEqual(window.start_button.text(), "Start Recording")
                 self.assertEqual(window.stop_button.text(), "Stop Recording")
-                self.assertEqual(window.watch_button.text(), "Watch Last Recording")
             finally:
                 third_person.stop()
                 instrument.stop()
@@ -455,6 +499,7 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
         instrument = SyntheticCamera(160, 120, fps=30)
         with tempfile.TemporaryDirectory() as tmp_root:
             window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            _quiesce(window)
             now = [0.0]
             window.controller._clock = lambda: now[0]
             try:
@@ -477,13 +522,19 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
 
                 time.sleep(0.2)  # real frames, so nothing looks stalled
                 now[0] = 15 * 60.0
-                window._poll_tick()
+                with patch("app.open_session") as mock_open:
+                    window._poll_tick()
 
                 self.assertEqual(window.controller.state, State.IDLE)
                 self.assertTrue(window.error_banner.isHidden())
                 self.assertIn("15-minute limit", window.summary_label.text())
-                self.assertTrue(window.watch_button.isEnabled())
                 self.assertFalse(window.stop_button.isEnabled())
+                # Stopping at the limit is still a stop: the student is put
+                # in front of the recording, not left to find it.
+                mock_open.assert_called_once()
+                self.assertEqual(
+                    mock_open.call_args.args[0], window.controller.last_session_dir
+                )
             finally:
                 if window.controller.state == State.RECORDING:
                     window.controller.stop_recording()

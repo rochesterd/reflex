@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import viewer
 from session_format import INSTRUMENT_STREAM, THIRD_PERSON_STREAM
+from session_buffer import Drive
 from session_reader import Session
 from test_session_reader import record_session
 from viewer import SessionPickerDialog, ViewerDialog, _mmss
@@ -238,6 +239,40 @@ class ViewerExportTest(unittest.TestCase):
         self.assertEqual(suggested.parent, drive)
         self.assertNotEqual(suggested.parent, self.session_dir)
 
+    def test_one_drive_asks_nothing(self):
+        dialog = self._dialog()
+        with patch("viewer.removable_drives_detailed", return_value=[_drive("E:")]):
+            with patch("viewer.default_export_dir", return_value=Path("E:/")):
+                with patch("viewer.QInputDialog.getItem") as chooser:
+                    self.assertEqual(dialog._choose_destination(), Path("E:/"))
+        chooser.assert_not_called()
+
+    def test_two_drives_let_the_student_pick(self):
+        """Taking the first by drive letter would quietly write a peer's
+        recording onto a stranger's stick."""
+        dialog = self._dialog()
+        drives = [_drive("E:", "SCHOOL"), _drive("F:", "MINE")]
+        with patch("viewer.removable_drives_detailed", return_value=drives):
+            with patch(
+                "viewer.QInputDialog.getItem", return_value=(drives[1].describe(), True)
+            ) as chooser:
+                destination = dialog._choose_destination()
+
+        self.assertEqual(destination, drives[1].path)
+        self.assertEqual(chooser.call_args.args[3], [d.describe() for d in drives])
+
+    def test_backing_out_of_the_chooser_exports_nothing(self):
+        dialog = self._dialog()
+        drives = [_drive("E:"), _drive("F:")]
+        with patch("viewer.removable_drives_detailed", return_value=drives):
+            with patch("viewer.QInputDialog.getItem", return_value=("", False)):
+                self.assertIsNone(dialog._choose_destination())
+                with patch("viewer.QFileDialog.getSaveFileName") as save:
+                    with patch.object(ViewerDialog, "_run_export") as mock_run:
+                        dialog._on_export_clicked()
+        save.assert_not_called()
+        mock_run.assert_not_called()
+
     def test_a_finished_export_is_reported_to_the_caller(self):
         """How app.py learns a session has been taken somewhere that
         outlives the buffer (see app.py's _unexported_session)."""
@@ -279,6 +314,10 @@ class ViewerExportTest(unittest.TestCase):
         with patch("viewer.QMessageBox.warning") as warn:
             dialog._report_export({}, out)
         warn.assert_called_once()
+
+
+def _drive(letter: str, label: str = "") -> Drive:
+    return Drive(path=Path(f"{letter}/"), label=label, free_bytes=8_000_000_000)
 
 
 class SessionPickerTest(unittest.TestCase):

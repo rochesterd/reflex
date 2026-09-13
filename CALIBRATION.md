@@ -143,19 +143,19 @@ This is the step that actually proves the install:
    something to tell students.
 3. Press **Start Recording**, and spend 20–30 seconds doing the real
    skill — hands moving, beam moving.
-4. Press **Stop Recording**, then **Watch Last Recording**.
+4. Press **Stop Recording**. The recording opens by itself.
 5. Check both panes: right way up, in focus, bright enough to see what the
    hands and the optics are doing, and moving smoothly.
 6. With a USB drive plugged in, press **Export video...** and save to it.
-   This is how students keep a recording, so it is part of the test.
+   This is how students keep a recording, so it is part of the test. With
+   two drives plugged in it asks which one first.
 
 Repeat for the second instrument. If both play back well, the room is
 ready.
 
-**Tell instructors this, because students need to hear it:** Reflex keeps
-nothing. A recording lives only until the app is closed, and a student who
-does not Export to their own drive loses it. The app warns before closing,
-but the habit is what matters.
+**Tell instructors this:** Reflex keeps nothing. A recording lives only
+until the app is closed, and a student who does not Export to their own
+drive loses it. The app warns before closing, but the habit is what matters.
 
 ---
 

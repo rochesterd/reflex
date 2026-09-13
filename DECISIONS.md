@@ -5025,3 +5025,48 @@ for now that nothing persists.
 
 ---
 
+## 2026-09-13 — Stopping opens the recording; Export asks which drive
+
+**Decided:** two follow-ons to the ephemeral buffer, both about the moment
+a recording ends.
+
+**Stopping opens the viewer, and the Watch button is gone.** With a buffer
+that dies with the app, reviewing and exporting is not an optional step
+after recording — it is the rest of recording, and a student who walks away
+from the kiosk without exporting has lost the take. A button they must know
+to press is exactly the wrong shape for that. `_review_last_session()` runs
+on every stop the student didn't press too: the session time limit, and a
+mid-recording failure that still finalized a session.
+
+Two guards. It opens **once per session**, because
+`stopped_at_time_limit` stays set until the next recording starts and the
+poll tick would otherwise reopen the viewer every 250ms. And it is
+**skipped when `session.json` is missing** — finalizing failed badly enough
+that the viewer has nothing to read, so the error banner is the whole
+story rather than a second failed dialog on top of it.
+`_unexported_session()` skips the same case: warning a student they are
+about to lose something they were never able to export asks them to do
+something they have no way to do.
+
+**Export asks which removable drive when more than one is plugged in.**
+`default_export_dir()` took the first by drive letter, which on a kiosk is
+a coin toss between a student's own stick and whatever else is in the
+machine — and writing a recording of *two* students onto a stranger's
+drive is the disclosure this whole design exists to prevent. One drive
+still asks nothing. The chooser lists volume label, letter and free space
+(`Drive.describe()`); the letter is there because it is the only part
+guaranteed unique, so two sticks both called USB stay tellable apart.
+Backing out cancels the export rather than picking one.
+
+**Rejected:** letting the save dialog carry it. A student navigating a file
+tree to find their own drive is the failure mode, not the fix; the chooser
+names the drives in the words written on them.
+
+**Test consequence worth knowing:** a `KioskWindow` left alive keeps
+polling, and tests that force `controller.state` (something only
+`start_recording()` does for real) make every later tick raise
+`KeyError: None`. `test_app.py`'s `_quiesce()` stops the timers; tests that
+want a tick call `_poll_tick()` directly.
+
+---
+
