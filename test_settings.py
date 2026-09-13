@@ -409,57 +409,6 @@ class SettingsWindowTest(unittest.TestCase):
         window._instrument_rows["bio"].label_edit.setText("BIO")
         _select(window._third_person_row, "32E4:9310")
 
-    def test_retention_is_off_by_default_and_omitted_from_saved_config(self):
-        window = self._make_window(
-            ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE]
-        )
-        self._fill_valid_selections(window)
-
-        self.assertFalse(window.retention_group.isChecked())
-        window._on_save_clicked()
-
-        written = json.loads(self.config_path.read_text(encoding="utf-8"))
-        self.assertNotIn("retention", written)
-
-    def test_enabling_retention_writes_all_three_fields(self):
-        window = self._make_window(
-            ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE]
-        )
-        self._fill_valid_selections(window)
-        window.retention_group.setChecked(True)
-        window.retention_age_spin.setValue(45)
-        window.retention_free_spin.setValue(25)
-        window.retention_protect_spin.setValue(10)
-
-        window._on_save_clicked()
-
-        written = json.loads(self.config_path.read_text(encoding="utf-8"))
-        self.assertEqual(
-            written["retention"], {"max_age_days": 45, "min_free_gb": 25, "protect_days": 10}
-        )
-
-    def test_existing_retention_config_populates_the_group(self):
-        data = json.loads(json.dumps(VALID_CONFIG))
-        data["retention"] = {"max_age_days": 60, "min_free_gb": 30, "protect_days": 14}
-        self.config_path.write_text(json.dumps(data), encoding="utf-8")
-
-        window = self._make_window(
-            ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE]
-        )
-
-        self.assertTrue(window.retention_group.isChecked())
-        self.assertEqual(window.retention_age_spin.value(), 60)
-        self.assertEqual(window.retention_free_spin.value(), 30)
-        self.assertEqual(window.retention_protect_spin.value(), 14)
-
-    def test_protect_days_spinbox_is_capped_at_max_age_days(self):
-        window = self._make_window()
-
-        window.retention_age_spin.setValue(5)
-        self.assertEqual(window.retention_protect_spin.maximum(), 5)
-        window.retention_protect_spin.setValue(999)
-        self.assertEqual(window.retention_protect_spin.value(), 5)
-
     def test_winusb_candidate_is_offered_only_when_one_is_detected(self):
         # An absent camera (or an
         # uninstalled driver package) must show up as nothing offered rather

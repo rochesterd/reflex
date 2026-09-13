@@ -502,7 +502,7 @@ class Recorder:
             self._writers = []
             # Remove the directory just created if nothing landed in it: a
             # repeated failed Start would otherwise litter sessions_dir with
-            # empty folders, which retention.py deliberately never deletes
+            # empty folders, which nothing else would clean up
             # (no session.json means "a failed session a technician should
             # look at").
             try:

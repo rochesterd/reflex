@@ -4942,3 +4942,33 @@ could not see.
 2026-09-13 measurements, but the cameras were unplugged before this was
 built. The BIO's gamma steps in particular want a look against a lit
 fundus -- the same measurement its default value is waiting on.
+
+---
+
+## 2026-09-13 - Retention is deleted, because nothing will accumulate
+
+**Removed `retention.py`, its tests, `RetentionConfig`, the config parsing,
+the Settings group and the startup pass.** 22 tests went with it.
+
+**Why, and it is not that it was wrong.** Retention answered "an unattended
+kiosk must not fill its disk over a semester". The answer to where
+recordings live is now that they do not live anywhere: a session exists in
+a temp buffer while the student is in front of the app, and what they keep
+is a file they exported. Nothing accumulates, so nothing needs sweeping.
+
+**It could not have solved the PII problem anyway.** Two of its rules made
+that impossible by design: it never touched a session without a
+`session.json` -- which is exactly what a crashed recording leaves -- and
+it never deleted the newest session. Both are right for "don't fill the
+disk" and wrong for "don't keep student images". A sweep at app startup
+also cannot run if the app never starts again, which is the case that
+matters after a crash.
+
+**What replaces it** is in ROADMAP's "An ephemeral buffer" entry: a temp
+buffer cleared at start and exit, a scheduled task created by the installer
+for the crash case, and Export as the only way data leaves the machine.
+
+**Keeping it during the transition was the tempting option, and wrong.**
+Two mechanisms deciding when recordings disappear is how a recording gets
+deleted by the one nobody remembered. This lands in the same commit as the
+plan that replaces it.

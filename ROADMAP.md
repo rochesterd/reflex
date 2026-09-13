@@ -35,62 +35,63 @@ diagnosis-only, per CLAUDE.md's "loud and early".
 
 ---
 
-## 2026-09-13 — Where recordings should live
+## 2026-09-13 — An ephemeral buffer, not a sessions folder
 
 **Every recording contains two students** — the one performing and the peer
 being examined. An eye and a face are PII, so a nickname solves nothing;
-the optional-identifier plan is folded in here. The kiosk no longer lists
-past sessions (DECISIONS 2026-09-13), which removed cross-student browsing
-but not the problem: sessions still pool on a shared machine.
+the optional-identifier plan is folded in here.
 
-### The question that picks the mechanism
+**The goal, decided 2026-09-13:** nothing containing PII outlives the app.
+The kiosk holds a recording only while the student is in front of it, and
+what they take away is a file they exported deliberately. There is no
+sessions folder, no accumulation, and therefore nothing to sweep —
+`retention.py` is already deleted.
 
-Not local-versus-USB. **Who may hold a recording of another student, and
-under what conditions?** NECO answers that; the answer picks the
-destination — the student's own drive, or a NECO system. Both need the same
-engineering. **Flash drives do not remove the PII problem, they distribute
-it:** handing a student the file discloses their peer's image to them and
-takes it outside any retention, deletion or breach process.
+### What replaces it
 
-### Intended destination: Panopto (to confirm with IT)
+- **A buffer under the user's temp directory**, one folder per session, in
+  place of `%PUBLIC%\Documents\Reflex\sessions`. `sessions_dir`, its
+  Settings field and `resolve_default_sessions_dir()` all go.
+- **Cleared at three moments:** app start, app exit, and — because an app
+  cannot clean up after its own crash — a scheduled task created by the
+  installer, running at logon. That third one is the answer to "what if it
+  crashes and nobody opens it again".
+- **Export becomes the deliverable.** The viewer's Export already renders a
+  composite MP4 with a partial-file discipline; it gains a destination
+  chooser, defaulting to a removable drive. For testing that is a student's
+  own drive; later it is Panopto.
+- **Watch Last Recording is unaffected** — the buffer exists for as long as
+  the app does.
+- **The disk preflight points at the buffer**, so a full temp drive still
+  refuses Start rather than failing mid-session.
 
-Institutional systems solve the governance half — access control,
-retention, audit, an owner. Panopto looks the closer fit: it is built for
-*multiple simultaneous feeds*, which is what a session is, and assignment
-folders give each student a space only they and instructors see. Canvas
-would likely mean one composited file (`session_export` can render it),
-losing the layout picker and independent angles.
+### The part that needs care
 
-**Blocking questions for IT, none of them technical for us:**
+**A student who does not export loses the recording.** That is the point,
+but it must never be a surprise: say it on Stop, say it again on close, and
+do not let a window close quietly on an unexported session. A student who
+loses a take to a dialog they did not read has been failed by the app, not
+by the policy.
+
+**Export failing is the recoverable case** — no drive, wrong drive, full
+drive. The buffer still holds the session, so the answer is "try again",
+and only closing the app is final.
+
+### Still to confirm with IT, for the Panopto destination
 
 1. Does NECO have Panopto, and does it cover this use?
 2. Can a kiosk get an API credential, and is a service account acceptable?
-3. What does the assignment-folder permission model actually allow?
-4. What is the storage quota, against ~750 MB per 15-minute session?
+3. What does the assignment-folder permission model allow?
+4. What is the quota, against ~750 MB per 15-minute session?
 
-A service account is simplest but lands every recording under one identity,
-which brings the identifier question straight back. Per-student login at
-the kiosk attributes correctly and is heavier for an unsupervised student.
+A service account lands every recording under one identity, which brings
+the identifier question straight back. Panopto is the better fit than
+Canvas: it is built for multiple simultaneous feeds, which is what a
+session is, where Canvas would mean one composited file.
 
-### The engineering, which is the same either way
-
-**Record locally, hand off, verify, delete.** Recording straight to a
-removable drive makes an irreplaceable capture depend on a cheap device
-that can be pulled mid-session or be too slow — the thing CLAUDE.md
-forbids. Capture to local disk as now, copy to the destination, verify the
-copy (the recorder already verifies its own MP4s), then delete the local
-one. Keep the destination pluggable: a drive and an upload are the same
-operation with a different target.
-
-**The failure cases are the design**, all student-facing: no drive or
-network, destination full, drive pulled mid-copy, student walks away. A
-session must never be silently stranded — hold un-handed-off sessions and
-say so on the next start.
-
-**Still not to be built until this settles:** audio, and any identifier
-feature. **Worth doing now, prejudging nothing:** turn on retention for the
-clinic machine — it exists, opt-in, and today a session sits there
-indefinitely. Config, not code.
+**Open question worth answering before building:** if recordings never
+persist and students keep exported composites, what is the viewer-only
+installer for? A composite plays in any media player.
 
 ---
 

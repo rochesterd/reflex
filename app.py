@@ -750,29 +750,6 @@ def main() -> int:
     instrument_labels = {key: inst.label for key, inst in cfg.instruments.items()}
     output_root = cfg.sessions_dir if cfg.sessions_dir is not None else resolve_default_sessions_dir()
 
-    if cfg.retention is not None:
-        # One cleanup pass at startup, before any recording -- never on the
-        # recording timer. A failure here must not stop the kiosk starting.
-        try:
-            from retention import apply_retention
-
-            result = apply_retention(Path(output_root), cfg.retention)
-            if result.deleted:
-                logger.info(
-                    "retention: removed %d old session(s), freed %.1f GB (%.1f GB free now)",
-                    len(result.deleted),
-                    result.freed_gb,
-                    result.free_bytes_after / 1024**3,
-                )
-            if not result.capacity_target_met:
-                logger.warning(
-                    "retention: free space still below %.0f GB after cleanup; recording stays "
-                    "gated by the disk preflight until space is freed",
-                    cfg.retention.min_free_gb,
-                )
-        except Exception:
-            logger.exception("retention: cleanup pass failed; continuing without it")
-
     window = KioskWindow(
         third_person,
         instruments,
