@@ -186,6 +186,7 @@ class IdsCamera(BaseCamera):
         target_fps: float | None = None,
         orientation: str | None = None,
         pixel_clock_hz: int | None = None,
+        binning: int | None = None,
         converge_auto: bool = True,
     ):
         super().__init__(queue_size=queue_size, label=serial, orientation=orientation)
@@ -201,6 +202,11 @@ class IdsCamera(BaseCamera):
         # because the *safe* clock depends on the host USB controller,
         # which is per-install. See _apply_pixel_clock().
         self._pixel_clock_hz = pixel_clock_hz
+        # Sums an NxN block of photosites into one pixel: N^2 the light for
+        # 1/N^2 the pixels. Like the pixel clock, it does NOT persist across
+        # opens on the uEye transport layer, so it is set here every time --
+        # and before Width/Height are read, since it changes them.
+        self._binning = binning
         # Per-instrument calibrated values from config.json (InstrumentConfig's
         # optional exposure_time_us/gain fields) -- see DECISIONS.md's
         # 2026-08-25 calibration entry. None means "let _converge_auto_nodes()
@@ -258,6 +264,7 @@ class IdsCamera(BaseCamera):
             # sets the frame period, and ExposureTime's own maximum is
             # derived from it.
             self._apply_pixel_clock()
+            self._apply_binning()
 
             self._width = int(self._node_map.FindNode("Width").Value())
             self._height = int(self._node_map.FindNode("Height").Value())
@@ -502,6 +509,23 @@ class IdsCamera(BaseCamera):
     def gain_range(self) -> tuple[float, float]:
         node = self._node_map.FindNode("Gain")
         return float(node.Minimum()), float(node.Maximum())
+
+    def _apply_binning(self) -> None:
+        """Best-effort, like every optional node here: a camera without
+        binning, or one whose maximum is below the requested factor, keeps
+        full resolution rather than failing to open."""
+        if not self._binning or self._binning <= 1:
+            return
+        horizontal = self._node_map.TryFindNode("BinningHorizontal")
+        vertical = self._node_map.TryFindNode("BinningVertical")
+        if horizontal is None or not horizontal.IsWriteable():
+            logger.info("%s: no writable binning; staying at full resolution", self.label)
+            return
+        factor = min(int(horizontal.Maximum()), self._binning)
+        horizontal.SetValue(factor)
+        if vertical is not None and vertical.IsWriteable():
+            vertical.SetValue(min(int(vertical.Maximum()), self._binning))
+        logger.info("%s: binning %dx%d", self.label, factor, factor)
 
     def _apply_pixel_clock(self) -> None:
         """Set the sensor pixel clock, which is what actually determines

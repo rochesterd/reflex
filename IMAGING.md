@@ -66,21 +66,30 @@ is the first row of each camera.
   only if something moved it into a range 256 levels can carry — which is
   what a tone curve does and what more capture bits alone do not.
 
-## Not yet known
+## Measured, 2026-09-13
 
-Each is a query against an attached camera, not an experiment. None has
-been run, because the question arose while the cameras were detached.
+Answers to what this section used to list as unknown. See DECISIONS.md's
+2026-09-13 entries for how each was measured.
 
-- **Region of interest and binning** — a bigger bandwidth lever than any
-  format change if either camera offers it, possibly enough to make
-  higher bit depth free.
-- **`DeviceLinkThroughputLimit`** — USB3 Vision cameras carry a
-  self-imposed cap that may already be shaping delivery.
-- **`ReverseX`/`ReverseY`** — hardware mirroring would make the
-  orientation Reflex applies to every frame free.
-- **Sustained frame rate at 10 and 12 bits**, counted by each camera's own
-  `FrameID` rather than assumed.
-- **The Keeler's `Gamma` range**, and whether writing it survives
-  `TLParamsLocked` at acquisition start.
-- **Host CPU during a real recording** — the one figure here that is not
-  about the cameras.
+- **Everything is writable at open.** Region of interest, binning,
+  decimation, mirroring, pixel format and the throughput cap read as
+  read-only only while streaming: that is `TLParamsLocked`, not a missing
+  capability.
+- **Region of interest:** slit lamp 16-1600 wide with the offset fixed at
+  0; Keeler 256-2056 with a small offset range.
+- **Binning:** 2x2 on the slit lamp, 8x8 on the Keeler, which also offers
+  2x decimation. It works and roughly doubles the light per pixel, but it
+  brightens highlight and shadow alike, so it buys nothing for dynamic
+  range -- and costs three quarters of the pixels.
+- **Throughput cap:** absent on the slit lamp; 400 MB/s and unthrottled on
+  the Keeler.
+- **Mirroring:** `ReverseX`/`ReverseY` writable on both, which would retire
+  the per-frame rotation in `camera.py` -- but `PixelFormat` does not change
+  when mirrored, so the colour-filter phase is an open question.
+- **The uEye transport layer resets pixel clock, binning and mirroring on
+  every open.** All three have to be applied in `IdsCamera._open()`.
+- **Host CPU:** 54% of one core for the slit lamp at 38fps free-running,
+  28% for the Keeler at 20fps, capture only.
+
+Still unmeasured: sustained frame rate at 10- and 12-bit, which needs a
+pixel-format parameter `IdsCamera` does not have.

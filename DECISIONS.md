@@ -4583,3 +4583,104 @@ instrument, since that is what a student is choosing between), and nothing
 else consumed it. The same reasoning as the white-balance removal the day
 before -- a field with no reader is speculative, and cheap to add back the
 day session traceability actually wants one.
+
+---
+
+## 2026-09-13 - What the two IDS cameras actually offer, measured
+
+Phase 0 of the "use what each camera's stack offers" plan, run against both
+cameras with `tools/probe_camera_features.py` (its first execution -- it
+worked unmodified) plus a stopped-device inspection.
+
+**Everything that reads as read-only while streaming is writable at open.**
+Region of interest, binning, decimation, mirroring, pixel format, the
+throughput limit: all of it is `TLParamsLocked`, not a missing capability.
+So anything here is Reflex's to set, as long as it is set before
+acquisition starts.
+
+| | slit lamp | Keeler BIO |
+|---|---|---|
+| region of interest | 16-1600 wide, offset fixed at 0 | 256-2056, offset 0-16 |
+| binning | 2x2 | **8x8**, plus 2x decimation |
+| throughput cap | absent | 400 MB/s, sitting at maximum |
+| gamma / LUT | absent | **0.30-3.00, writable while streaming** |
+| black level | 0-255 (offset scale) | 0-31.94, on continuous auto |
+| mirroring | ReverseX/Y writable | ReverseX/Y writable |
+
+**Three settings reset on every open on the uEye transport layer** -- pixel
+clock (already known), and now binning and mirroring. A two-process test
+that sets them and reopens measures nothing, which is how the first binning
+run produced a null result. They belong in `_open()` beside the pixel clock.
+
+**The Keeler's `AcquisitionFrameRate` was found at 20fps**, from persisted
+device state nobody set deliberately: exactly the invisible-state problem
+CLAUDE.md's "the app holds the values, the camera doesn't" rule exists for.
+Reflex's frame-rate cap overrides it at open, so nothing was wrong in the
+app; it is the camera that was carrying a stale answer.
+
+---
+
+## 2026-09-13 - Black level: the slit lamp's default destroys a third of the frame
+
+Measured against a narrow beam on a black focus rod -- a genuinely black
+surface at the exact focal distance, which is the hardest case for lifting
+a black floor, since it is the thing that must not turn grey.
+
+At a scene-appropriate exposure (7.47ms, gain 1.0, auto-calibrated), the
+camera's factory `BlackLevel` of 90 pins **12-60% of the frame to exactly
+0**, varying with how much of the field the beam lights. The crush stops
+between 90 and 95. At 110 nothing is clipped, the floor sits at 6-7 of 255,
+and the beam is unchanged (p99.9 193 -> 198). Side by side, 90 and 110 are
+visually identical: the rod still reads black.
+
+**Gain never makes it worse.** The offset scales with gain, so at 2x and 4x
+nothing crushes even at 90. A value chosen at gain 1 -- the worst case -- is
+safe for every calibration above it. That is what makes this a per-model
+preset rather than a per-room one.
+
+**Binning is not the answer to shadows, and this is the useful negative
+result.** 2x2 binning does work (1600x1200 becomes 800x600) and roughly
+doubles the light: at identical exposure the beam goes from p99 100 to 197.
+But it brightens the beam as much as the surround, so it buys nothing for
+*dynamic range*, which is the actual problem -- and it costs three quarters
+of the pixels on an instrument whose point is fine detail. The scene also
+calibrated to 7.47ms of a 30ms budget, so this camera is not short of light
+in the first place. Binning is kept in mind for the opposite case: a room
+too dim to reach 30fps, where it beats raising gain.
+
+---
+
+## 2026-09-13 - The BIO's on-camera gamma does what higher bit depth was wanted for
+
+Swept `Gamma` at a fixed exposure and gain, so the curve was the only
+variable. The direction is the opposite of the usual convention: on this
+camera **values above 1.0 lift the shadows**.
+
+| gamma | p25 | p50 | p99.9 | pure black |
+|---|---|---|---|---|
+| 1.00 (today) | 1 | 2 | 206 | 14.9% |
+| 1.50 | 5 | 10 | 220 | 0.5% |
+| 2.20 | 13 | 24 | 231 | 0.1% |
+| 3.00 | 22 | 40 | 237 | 0.0% |
+
+Shadows rise by an order of magnitude and **the highlight never clips** --
+206 to 237, still short of 250 -- because the curve compresses the top as it
+expands the bottom. On the camera, before the 8-bit conversion, for no
+bandwidth and no host CPU. This is the thing 10/12-bit capture plus a host
+tone curve was being considered for, already present and switched off.
+
+**Not yet a value we can adopt.** The test scene was whatever could be
+pointed at, and it calibrated to gain 25.2x of 25.4 max -- severely
+light-starved, so the lift amplified noise along with signal. Choosing a
+number needs a properly lit fundus view. Two implementation notes for when
+it happens: gamma changes what `auto_calibrate()` meters, so the order of
+the two matters; and the same sweep found `Gamma.SetValue(0.3)` rejected
+against a minimum of 0.30000001, so callers must clamp to `Minimum()`
+rather than the documented range.
+
+**Hardware mirroring is available on both cameras but unadopted.** It would
+retire the per-frame rotation `camera.py` applies today. Two unknowns
+first: it does not persist across opens, and `PixelFormat` still reports
+`BayerRG8` when mirrored, so whether the colour-filter phase shift is
+compensated is untested. A wrong answer there is wrong colour, not a wrong
+orientation.
