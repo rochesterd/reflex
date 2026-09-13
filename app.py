@@ -54,7 +54,7 @@ from reflex_mark import ReflexMark
 import reflex_style
 from synthetic_camera import SyntheticCamera
 from uvc_camera import UvcCamera
-from viewer import browse_sessions, open_session
+from viewer import open_session
 
 logger = logging.getLogger(__name__)
 
@@ -236,12 +236,14 @@ class KioskWindow(QMainWindow):
         self.watch_button.setEnabled(False)
         self.watch_button.clicked.connect(self._on_watch_clicked)
 
-        # Reaching an earlier session matters as much as the one just
-        # finished: a student may come back to review, or want to export a
-        # file from last week's attempt.
-        self.past_button = QPushButton("Watch Past Recordings")
-        self.past_button.setMinimumHeight(40)
-        self.past_button.clicked.connect(self._on_past_recordings_clicked)
+        # There is deliberately no "Watch Past Recordings" here. Every
+        # session holds identifiable images of two students and they all
+        # land in one folder, so browsing the list showed any student every
+        # other student's recordings. Watch Last Recording covers the
+        # session a student just made, which is the one they can consent to
+        # seeing. See DECISIONS.md's 2026-09-13 entry and ROADMAP's
+        # recordings-are-PII entry: this comes back when a session belongs
+        # to somebody.
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.start_button)
@@ -249,7 +251,6 @@ class KioskWindow(QMainWindow):
 
         summary_row = QHBoxLayout()
         summary_row.addWidget(self.summary_label, stretch=1)
-        summary_row.addWidget(self.past_button)
         summary_row.addWidget(self.watch_button)
 
         header = QHBoxLayout()
@@ -366,13 +367,6 @@ class KioskWindow(QMainWindow):
             return
         self._with_preview_paused(lambda: open_session(session_dir, parent=self))
 
-    def _on_past_recordings_clicked(self) -> None:
-        if self.controller.state == State.RECORDING:
-            return
-        self._with_preview_paused(
-            lambda: browse_sessions(self.controller.output_root, parent=self)
-        )
-
     def _with_preview_paused(self, action) -> None:
         """Run a modal viewer with the live preview paused.
 
@@ -431,7 +425,6 @@ class KioskWindow(QMainWindow):
         self.watch_button.setEnabled(
             state != State.RECORDING and self.controller.last_session_dir is not None
         )
-        self.past_button.setEnabled(state != State.RECORDING)
 
         if state == State.RECORDING:
             self.status_label.setText(self._recording_status())

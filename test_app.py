@@ -279,37 +279,17 @@ class TestWatchButton(unittest.TestCase):
                 third_person.stop()
                 instrument.stop()
 
-    def test_past_recordings_browses_the_sessions_folder(self):
+    def test_the_kiosk_offers_no_way_to_browse_other_sessions(self):
+        """Every session holds two students' faces and they share one
+        folder, so a list of them is a list of other people's recordings.
+        See DECISIONS.md 2026-09-13."""
         with tempfile.TemporaryDirectory() as tmp_root:
             window, third_person, instrument = self._window(tmp_root)
             try:
-                with patch("app.browse_sessions") as mock_browse:
-                    mock_browse.side_effect = lambda *a, **k: self.assertFalse(
-                        window.preview_timer.isActive()
-                    )
-                    window._on_past_recordings_clicked()
-
-                mock_browse.assert_called_once()
-                self.assertEqual(mock_browse.call_args.args[0], Path(tmp_root))
-                self.assertTrue(window.preview_timer.isActive())
-            finally:
-                third_person.stop()
-                instrument.stop()
-
-    def test_past_recordings_is_available_before_any_session_but_not_while_recording(self):
-        with tempfile.TemporaryDirectory() as tmp_root:
-            window, third_person, instrument = self._window(tmp_root)
-            try:
-                window._sync_ui(window.controller.poll_preflight())
-                self.assertTrue(window.past_button.isEnabled())
-
-                window.controller.state = State.RECORDING
-                window._sync_ui()
-                self.assertFalse(window.past_button.isEnabled())
-
-                with patch("app.browse_sessions") as mock_browse:
-                    window._on_past_recordings_clicked()
-                mock_browse.assert_not_called()
+                self.assertFalse(hasattr(window, "past_button"))
+                self.assertFalse(hasattr(window, "_on_past_recordings_clicked"))
+                # The one a student just made is still reachable.
+                self.assertTrue(hasattr(window, "watch_button"))
             finally:
                 third_person.stop()
                 instrument.stop()
@@ -376,7 +356,6 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
                 self.assertEqual(window.start_button.text(), "Start Recording")
                 self.assertEqual(window.stop_button.text(), "Stop Recording")
                 self.assertEqual(window.watch_button.text(), "Watch Last Recording")
-                self.assertEqual(window.past_button.text(), "Watch Past Recordings")
             finally:
                 third_person.stop()
                 instrument.stop()

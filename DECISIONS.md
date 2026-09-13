@@ -4860,3 +4860,35 @@ timeout, USB selective suspend on the camera ports) would belong there:
 that file is at 184 of its 185-line budget, and the case that could lose a
 recording is now handled in code. If the file is ever trimmed, three lines
 there would still help a technician.
+
+---
+
+## 2026-09-13 - The kiosk no longer browses past recordings
+
+**Removed "Watch Past Recordings" from `app.py`.** Every session holds
+identifiable images of two students -- the one performing the skill and the
+peer being examined -- and every session lands in one folder on a shared
+machine. The button listed all of them to whoever was standing there, so
+any student could watch any other student's recordings. Nothing in the app
+scoped a session to the person who made it, and nothing could: there is no
+identity in a recording today.
+
+**Watch Last Recording stays.** A student reviewing what they just made is
+the whole point of the app, and it is the one recording they were present
+for. It reaches `last_session_dir` directly rather than through a list, so
+it cannot show anything else.
+
+**`browse_sessions()` stays in `viewer.py`,** which is right: the
+viewer-only installer runs on a reviewer's own laptop with recordings they
+were given. The shared kiosk is the context that made the list a problem,
+not the function.
+
+**This is a mitigation, not the answer.** ROADMAP's "Recordings are PII"
+entry holds the real question -- where recordings should live when a
+machine is shared, and what a student takes away. When a session belongs to
+somebody, a list of *their* sessions is exactly the right feature, and this
+comes back.
+
+**Cost, stated plainly:** a student who wants last week's recording can no
+longer reach it from the kiosk. That is a real loss of function, accepted
+because the alternative is every student reaching everyone else's.
