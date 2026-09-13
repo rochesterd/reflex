@@ -25,11 +25,9 @@ Design consequences:
   installation, configuration, and calibration; within a session, the
   student is guided entirely by the app, never by documentation.
 - Protecting the student from mistakes is the goal, not minimizing what's
-  clickable for its own sake. During recording, nothing that could
-  interrupt an irreplaceable capture is interactive — the picker and the
-  viewer buttons are disabled. Brightness is the one exception: it writes a
-  camera setting, never touches the stream, and the views students need it
-  for differ within one session (DECISIONS.md 2026-09-13).
+  clickable for its own sake. During recording nothing that could interrupt
+  an irreplaceable capture is interactive. Brightness is the one exception:
+  it writes a camera setting, never the stream (DECISIONS.md 2026-09-13).
 - Before recording, the same goal applies with less rigidity. Today it's
   satisfied by a minimal instrument picker + Start (see `app.py`) — not
   because fewer buttons is inherently better. A more guided flow is fine
@@ -185,7 +183,7 @@ tests `<name>.py` and says how in its own docstring.
 | `recorder.py` | Two separate VFR files on one shared clock, no compositing. A `_StreamWriter` per camera drains with `read()`, stamps ms PTS from the session origin, enforces the `recording.fps` ceiling, then remuxes MKV→MP4, verifies, and deletes the MKV. Writes `session.json` v2. See DECISIONS.md's "Recorder/Viewer split" entries. |
 | `retention.py` | Opt-in cleanup of old sessions (`config.json`'s `retention`, off by default), once at `app.py` startup: an age sweep plus a low-disk pass. Never touches a non-session folder, a session without `session.json`, or the newest session. |
 | `kiosk.py` | `KioskController` — the state machine (idle/ready/recording/error): the `select_instrument()` lifecycle, preflight (liveness, **freshness**, disk space), stall and freeze detection, and the session time limit (`MAX_SESSION_MINUTES` — reaching it is a normal stop, and it's the session length the disk preflight budgets for). Freshness (`_frame_signature()`) catches a camera that delivers frames but has stopped *seeing*. No Qt. |
-| `app.py` | The kiosk: a thin PySide6 shell over `KioskController` — the Reflex mark, instrument picker, **Start Recording**, **Stop Recording** (the status line counts up against the session limit), a three-step **Brightness** control that stays live while recording, **Watch Last Recording** (modal; no browsing of other sessions — DECISIONS.md 2026-09-13; `_with_preview_paused()` stops the preview around them while the cameras keep running). Picker and viewer buttons disable while recording. Owns no decisions. |
+| `app.py` | The kiosk: a thin PySide6 shell over `KioskController` — the Reflex mark, instrument picker, **Start Recording**, **Stop Recording** (the status line counts up against the session limit), a three-step **Brightness** control (live while recording), **Watch Last Recording** (modal; no browsing of other sessions — DECISIONS.md 2026-09-13; `_with_preview_paused()` stops the preview around them while the cameras keep running). Picker and viewer buttons disable while recording. Owns no decisions. |
 | `settings.py` | Technician tool: per role a device dropdown, a profile dropdown (instrument rows only; auto-selected from the model, Custom always available), the student-facing name (pre-filled from the profile, technician's to change), and Preview (with Auto-Calibrate), then Rescan, a recordings folder, opt-in retention, and Save to `config.json`. No hot reload. A separate program from `app.py`. |
 | `setup.ps1`, `setup_wizard.py` | Developer-machine bootstrap (venv, requirements, IDS runtime check), and its tkinter GUI — tkinter because it runs before PySide6 is installed. Not part of any clinic machine's path; see `SETUP.md`. |
 | `packaging/*.spec` | PyInstaller specs for the three exes. `viewer.spec`'s `excludes` (`ids_peak`, `ids_peak_ipl`, `pygrabber`, `comtypes`) is an assertion: if the viewer ever reaches camera code, the build fails loudly. See `PACKAGING.md`. |
