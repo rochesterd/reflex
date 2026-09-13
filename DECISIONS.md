@@ -5070,3 +5070,40 @@ want a tick call `_poll_tick()` directly.
 
 ---
 
+## 2026-09-13 — Brightness is a slider after all
+
+**Decided:** the three brightness buttons become a three-stop slider with
+the step's name beside it. This reverses the same-day entry above, which
+chose named buttons over a slider.
+
+**Why the reversal:** the original argument was that "brighter" is a
+judgement a student makes from the picture and a number is not. That still
+holds — which is why the slider is *not* numeric: it carries the same three
+words, showing the one it is on. What the slider adds is a sense of how
+much room is left, which three buttons never gave: a student on "Brighter"
+could not see whether there was more to come without reading the buttons.
+
+**What the implementation had to work around:**
+
+- **Qt's tick marks do not render.** A stylesheet on a `QSlider` replaces
+  the whole subcontrol drawing, and Reflex styles the handle, so
+  `TicksBelow` draws nothing. The stops are therefore conveyed by the
+  slider's *width* and the step name, not by tick marks.
+- **The width is fixed at 220px.** Stretched across the window a
+  three-stop slider reads as a continuous fine adjustment and leaves large
+  dead zones between stops.
+- **`reflex_style.TOUCH_SLIDER` gives it a 30px handle**, roughly twice
+  the viewer's scrub bar. This is the one control a student uses mid
+  recording, with an instrument at their eye, and a small target there is
+  the difference between adjusting and fumbling.
+- **`_sync_ui()` reflects the level without writing it back** — it runs
+  four times a second, and the camera already holds the value. It also
+  skips the update entirely while the handle is held down.
+
+**Unchanged:** the levels themselves, which are still integers meaning
+whatever each camera's best lever is (gamma on the Keeler, light on the
+slit lamp, the bridge's brightness register on the older BIO), and the
+control still disappears for a camera offering one level.
+
+---
+

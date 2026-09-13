@@ -29,6 +29,10 @@ CHOICE = "choice"  # a pick-one option: the instrument picker
 STATUS = "status"  # the kiosk's live status line
 SECONDARY = "secondary"  # supporting text: summaries, session details
 BRAND_RULE = "brandRule"
+# A slider a student uses mid-recording, with an instrument at their eye:
+# the handle is twice the scrub bar's, because a small target there is the
+# difference between adjusting and fumbling. See app.py's brightness row.
+TOUCH_SLIDER = "touchSlider"
 
 
 def _font(families: tuple[str, ...], point_size: int) -> QFont:
@@ -142,6 +146,14 @@ QSlider::handle:horizontal {{
     height: 16px;
     margin: -6px 0;
     border-radius: 8px;
+}}
+
+QSlider#{TOUCH_SLIDER}::groove:horizontal {{ height: 8px; border-radius: 4px; }}
+QSlider#{TOUCH_SLIDER}::handle:horizontal {{
+    width: 30px;
+    height: 30px;
+    margin: -11px 0;
+    border-radius: 15px;
 }}
 
 QLabel#{STATUS} {{ font-size: 13pt; }}

@@ -475,8 +475,71 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
                 window._sync_ui()
 
                 self.assertFalse(window.start_button.isEnabled())
-                for button in window.brightness_buttons:
-                    self.assertTrue(button.isEnabled())
+                self.assertTrue(window.brightness_slider.isEnabled())
+            finally:
+                third_person.stop()
+                instrument.stop()
+
+    def test_the_slider_names_the_step_it_is_on(self):
+        """A student judges brightness by the picture, so the control says
+        "Brighter", not "1". The word is what makes the position mean
+        something before they have moved it."""
+        third_person = SyntheticCamera(160, 120, fps=30)
+        instrument = SyntheticCamera(160, 120, fps=30)
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            _quiesce(window)
+            try:
+                self.assertEqual(window.brightness_value_label.text(), "Normal")
+
+                window.brightness_slider.setValue(2)
+
+                self.assertEqual(window.brightness_value_label.text(), "Brightest")
+                self.assertEqual(window.controller.brightness_level, 2)
+            finally:
+                third_person.stop()
+                instrument.stop()
+
+    def test_the_slider_has_one_stop_per_step_the_camera_offers(self):
+        third_person = SyntheticCamera(160, 120, fps=30)
+        instrument = SyntheticCamera(160, 120, fps=30)
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            _quiesce(window)
+            try:
+                window._on_instrument_clicked("slit_lamp")
+                window._sync_ui()
+
+                steps = window.controller.brightness_levels()
+                self.assertGreater(steps, 1)
+                self.assertEqual(window.brightness_slider.minimum(), 0)
+                self.assertEqual(window.brightness_slider.maximum(), steps - 1)
+                # One stop per press: three positions should never need a
+                # precise drag.
+                self.assertEqual(window.brightness_slider.pageStep(), 1)
+                self.assertTrue(window.brightness_slider.isVisible() or window.isHidden())
+            finally:
+                third_person.stop()
+                instrument.stop()
+
+    def test_syncing_reflects_the_level_without_rewriting_it(self):
+        """_sync_ui runs four times a second; it must show what the
+        controller holds without sending it back to the camera."""
+        third_person = SyntheticCamera(160, 120, fps=30)
+        instrument = SyntheticCamera(160, 120, fps=30)
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window = KioskWindow(third_person, {"slit_lamp": instrument}, output_root=tmp_root)
+            _quiesce(window)
+            try:
+                window._on_instrument_clicked("slit_lamp")
+                window.controller.brightness_level = 1  # e.g. restored on restart
+
+                with patch.object(window.controller, "set_brightness_level") as setter:
+                    window._sync_ui()
+
+                setter.assert_not_called()
+                self.assertEqual(window.brightness_slider.value(), 1)
+                self.assertEqual(window.brightness_value_label.text(), "Brighter")
             finally:
                 third_person.stop()
                 instrument.stop()

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -93,7 +94,8 @@ LOG_FILE = LOG_DIR / "app.log"
 
 THIRD_PERSON_LABEL = "third-person camera"
 
-# What the brightness steps are called. A student picks a picture, not a
+# What the brightness steps are called, one per slider stop. A student
+# picks a picture, not a
 # gamma value -- and the words have to mean something with the instrument
 # at their eye, not on a spec sheet.
 BRIGHTNESS_STEP_NAMES = ("Normal", "Brighter", "Brightest")
@@ -250,23 +252,43 @@ class KioskWindow(QMainWindow):
         # different reason: every session holds two students' faces. See
         # DECISIONS.md's 2026-09-13 entries.
 
-        # The one control a student may touch mid-recording. Three named
-        # steps rather than a slider: "brighter" is a judgement they can
-        # make from the picture, a number is not. See DECISIONS.md's
-        # 2026-09-13 brightness entry.
+        # The one control a student may touch mid-recording. A slider with
+        # one stop per step, and the step's *name* beside it: the value is
+        # a picture they judge by eye, so the word carries the meaning and
+        # the handle shows how much room is left. Sized generously because
+        # this gets used with an instrument at the student's eye, where a
+        # small target is the difference between adjusting and fumbling.
+        # See DECISIONS.md's 2026-09-13 brightness entries.
         self.brightness_label = QLabel("Brightness")
         self.brightness_label.setObjectName(reflex_style.SECONDARY)
-        self.brightness_buttons: list[QPushButton] = []
+        self.brightness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.brightness_slider.setMinimum(0)
+        self.brightness_slider.setMaximum(len(BRIGHTNESS_STEP_NAMES) - 1)
+        # One stop per press, either by click or by arrow key -- a control
+        # with three positions should never need a precise drag.
+        self.brightness_slider.setSingleStep(1)
+        self.brightness_slider.setPageStep(1)
+        self.brightness_slider.setObjectName(reflex_style.TOUCH_SLIDER)
+        self.brightness_slider.setMinimumHeight(40)
+        # Narrow on purpose. Stretched across the window, three stops read
+        # as a continuous fine adjustment and leave big dead zones between
+        # them; at this width the steps are obvious. Qt's tick marks are
+        # not an option -- a stylesheet on a slider replaces the whole
+        # subcontrol drawing, so TicksBelow renders nothing.
+        self.brightness_slider.setFixedWidth(220)
+        self.brightness_slider.valueChanged.connect(self._on_brightness_changed)
+        # Fixed width, so the row doesn't shuffle as the word changes.
+        self.brightness_value_label = QLabel(BRIGHTNESS_STEP_NAMES[0])
+        self.brightness_value_label.setMinimumWidth(70)
+
+        # Centred as one group rather than spread across the window, so
+        # the caption, the handle and the word read as a single control.
         brightness_row = QHBoxLayout()
+        brightness_row.addStretch(1)
         brightness_row.addWidget(self.brightness_label)
-        for index, text in enumerate(BRIGHTNESS_STEP_NAMES):
-            button = QPushButton(text)
-            button.setCheckable(True)
-            button.setChecked(index == 0)
-            button.setMinimumHeight(34)
-            button.clicked.connect(functools.partial(self._on_brightness_clicked, index))
-            self.brightness_buttons.append(button)
-            brightness_row.addWidget(button)
+        brightness_row.addWidget(self.brightness_slider)
+        brightness_row.addWidget(self.brightness_value_label)
+        brightness_row.addStretch(1)
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.start_button)
@@ -359,10 +381,18 @@ class KioskWindow(QMainWindow):
         self._try_select_instrument()
         self._sync_ui()
 
-    def _on_brightness_clicked(self, level: int) -> None:
+    def _on_brightness_changed(self, level: int) -> None:
         self.controller.set_brightness_level(level)
-        for index, button in enumerate(self.brightness_buttons):
-            button.setChecked(index == level)
+        self.brightness_value_label.setText(self._brightness_name(level))
+
+    @staticmethod
+    def _brightness_name(level: int) -> str:
+        """The word for a step. Falls back to a number for a camera that
+        offers more steps than there are names, so a new camera can't make
+        the control unlabelled."""
+        if 0 <= level < len(BRIGHTNESS_STEP_NAMES):
+            return BRIGHTNESS_STEP_NAMES[level]
+        return f"Level {level + 1}"
 
     def _on_start_clicked(self) -> None:
         if self.controller.state != State.READY:
@@ -477,10 +507,26 @@ class KioskWindow(QMainWindow):
     def _sync_ui(self, preflight: PreflightStatus | None = None) -> None:
         state = self.controller.state
         self.mark.set_recording(state == State.RECORDING)
+        # A camera with one step has nothing to offer, so the control
+        # goes rather than sitting there inert.
         steps = self.controller.brightness_levels()
-        self.brightness_label.setVisible(steps > 1)
-        for index, button in enumerate(self.brightness_buttons):
-            button.setVisible(steps > 1 and index < steps)
+        adjustable = steps > 1
+        self.brightness_label.setVisible(adjustable)
+        self.brightness_slider.setVisible(adjustable)
+        self.brightness_value_label.setVisible(adjustable)
+        if adjustable:
+            self.brightness_slider.setMaximum(steps - 1)
+            # Never while they are dragging: this runs on every poll tick,
+            # and the controller already has whatever they just chose.
+            if not self.brightness_slider.isSliderDown():
+                level = self.controller.brightness_level
+                if self.brightness_slider.value() != level:
+                    # The camera already has this value -- reflect it
+                    # without writing it back.
+                    self.brightness_slider.blockSignals(True)
+                    self.brightness_slider.setValue(level)
+                    self.brightness_slider.blockSignals(False)
+                self.brightness_value_label.setText(self._brightness_name(level))
 
         self.start_button.setEnabled(state == State.READY)
         self.stop_button.setEnabled(state == State.RECORDING)
