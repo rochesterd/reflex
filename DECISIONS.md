@@ -4827,3 +4827,36 @@ was saved from a dim scene during this session's gamma work. What the
 episode says is that a warning printed at startup -- which is all
 `exposure_fps_warnings()` did -- is not a control. Nobody reads a log on a
 kiosk.
+
+---
+
+## 2026-09-13 - A recording holds the machine awake
+
+From the second feedback round: the machine slept about two minutes into a
+session. Recording carried on correctly, which is the design working --
+capture threads do not care about the display -- but a preview that
+vanishes mid-skill looks like a fault, and a machine that suspends fully
+takes the USB cameras with it.
+
+`kiosk.set_keep_awake()` asks Windows for `ES_SYSTEM_REQUIRED |
+ES_DISPLAY_REQUIRED` when a recording starts and clears it when one ends.
+It sits in `KioskController` rather than `app.py` so every path that ends a
+session releases it: the Stop button, the time limit, and `_fail()`. A flag
+outlives the process that set it, so the failure path matters as much as
+the happy one -- there is a test for each.
+
+**Scoped to recording, deliberately.** A kiosk that never sleeps at all is
+a facilities decision about someone else's electricity bill; an
+in-progress, irreplaceable capture is ours. Between sessions the machine
+may sleep as its owner configured it.
+
+**Best-effort, like every other platform call here.** Not Windows, or the
+call fails, and recording proceeds exactly as before -- it logs and
+continues rather than treating a power hint as a reason to refuse a
+student.
+
+**Not documented in CALIBRATION.md**, though the remaining advice (screen
+timeout, USB selective suspend on the camera ports) would belong there:
+that file is at 184 of its 185-line budget, and the case that could lose a
+recording is now handled in code. If the file is ever trimmed, three lines
+there would still help a technician.

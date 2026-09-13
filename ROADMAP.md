@@ -42,16 +42,48 @@ and early" — the one plausible exception being a technician-clicked
 
 ---
 
-## 2026-09-11 — Optional student identifier on a recording (planned, not designed)
+## 2026-09-13 — Recordings are PII, and they pool on a shared machine
 
-From the first round of student feedback: an optional name or nickname for
-the student doctor, so recordings can be tracked to whoever made them,
-with a nickname allowed out of respect for FERPA. The open questions are
-in DECISIONS.md's "First round of student feedback" entry (item E). The
-main ones: whether the identifier goes into folder names or only into
-`session.json`, and NECO's answer on real names and on who can see whose
-recordings. Those need answers before any design. Whatever it becomes, it
-must stay optional and must never gate Start.
+Raised while answering the second feedback round's audio question, and it
+turned out to be the larger issue. **Every recording already contains
+identifiable images of two students** — the one performing the skill and the
+peer acting as patient. An eye and a face are PII; a nickname does not
+change that, which is why the "optional identifier" plan is folded into
+this entry rather than kept separately.
+
+**The exposure that exists today, before any new feature.** Sessions are
+written to one folder on the kiosk (`%PUBLIC%\Documents\Reflex\sessions`),
+and **Watch Past Recordings lists all of them to whoever is standing
+there**. Any student can watch any other student's session. Nothing in the
+app scopes a recording to the person who made it.
+
+**Direction, from the developer 2026-09-13:** stop pooling recordings in a
+local folder; have each student take their own away — a personal flash
+drive is the current thinking. The workflow questions are real and
+unanswered: what happens when the drive is absent or full mid-session, who
+owns the `sessions_dir` default, whether anything may remain on the kiosk
+between sessions, and what the app should do about recordings already
+sitting there.
+
+**What must not be built before that is settled:** audio (it adds voices to
+data we cannot yet place correctly), and any identifier feature (it makes
+recordings more findable while the storage question is open). Neither is a
+technical blocker; both would deepen a problem we have not solved.
+
+**Worth considering as immediate mitigations,** each small and independent:
+
+- Disable or remove **Watch Past Recordings**, leaving Watch Last Recording
+  for the session a student just made. One flag; removes the cross-student
+  browsing entirely.
+- Make `sessions_dir` a removable drive, and refuse to start when it is
+  absent — the disk preflight already has the shape for this.
+- Retention: today's opt-in cleanup is a blunt instrument for this, but a
+  "clear the kiosk between students" pass is the same machinery.
+
+The full analysis the developer describes — everything this app can capture,
+and how each piece must be handled — belongs in its own DECISIONS entry
+once NECO's requirements are known. This entry is the placeholder, and the
+statement that the app is not currently built for the answer.
 
 ---
 

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+import kiosk
 from kiosk import (
     REQUIRED_SPACE_MULTIPLIER,
     KioskController,
@@ -850,6 +851,61 @@ class TestSessionTimeLimit(unittest.TestCase):
             status.required_bytes,
             REQUIRED_SPACE_MULTIPLIER * estimate_recording_bytes(160, 120, 30, minutes=7.0),
         )
+
+
+class KeepAwakeTests(unittest.TestCase):
+    """A recording holds the machine awake for exactly its own duration.
+    Students reported the screen sleeping two minutes into a session."""
+
+    def _run(self, body):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp_root:
+            third = SyntheticCamera(160, 120, fps=30, name="third")
+            instrument = SyntheticCamera(160, 120, fps=30, name="instrument")
+            third.start()
+            instrument.start()
+            try:
+                controller = KioskController(
+                    third_person_camera=third,
+                    instruments={"instrument": instrument},
+                    output_root=tmp_root,
+                    fps=30,
+                )
+                controller.select_instrument("instrument")
+                # Recording is only reachable from READY, which preflight
+                # grants once frames are actually arriving.
+                for _ in range(20):
+                    time.sleep(0.1)
+                    controller.poll_preflight()
+                    if controller.state is State.READY:
+                        break
+                with patch.object(kiosk, "set_keep_awake", side_effect=calls.append):
+                    body(controller)
+            finally:
+                third.stop()
+                instrument.stop()
+        return calls
+
+    def test_recording_holds_it_awake_and_stopping_releases_it(self):
+        def body(controller):
+            controller.start_recording()
+            time.sleep(0.3)
+            controller.stop_recording()
+
+        self.assertEqual(self._run(body), [True, False])
+
+    def test_nothing_is_held_when_no_recording_starts(self):
+        self.assertEqual(self._run(lambda controller: controller.poll_preflight()), [])
+
+    def test_a_failure_releases_it_too(self):
+        """A session that ends badly must not leave the machine pinned
+        awake -- the flag outlives the process that set it."""
+        def body(controller):
+            controller.start_recording()
+            time.sleep(0.2)
+            controller._fail("something went wrong")
+
+        self.assertEqual(self._run(body), [True, False])
 
 
 if __name__ == "__main__":

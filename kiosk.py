@@ -13,6 +13,7 @@ from __future__ import annotations
 import enum
 import logging
 import shutil
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,6 +159,35 @@ class PreflightStatus:
     @property
     def ok(self) -> bool:
         return self.cameras_ready and self.disk_ok and not self.frozen_cameras
+
+
+def set_keep_awake(active: bool) -> None:
+    """Ask Windows not to sleep while a recording is in progress.
+
+    Scoped to recording rather than the app's whole lifetime: a kiosk that
+    never sleeps is a facilities decision, while an in-progress capture is
+    irreplaceable and a machine that suspends mid-session can take the USB
+    cameras with it. Students reported the screen sleeping about two
+    minutes into a session -- the capture threads carried on correctly, but
+    a preview that vanishes looks like a fault, and a full sleep would not
+    have been survivable.
+
+    Best-effort, like every other platform call here: not Windows, or the
+    call fails, and recording proceeds exactly as before.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # ES_CONTINUOUS keeps the state until it is cleared; the other two
+        # say the system and its display are both still needed.
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x00000001, 0x00000002
+        flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED if active else 0)
+        if ctypes.windll.kernel32.SetThreadExecutionState(flags) == 0:
+            logger.warning("could not ask Windows to stay awake (recording continues regardless)")
+    except Exception:
+        logger.exception("keeping the machine awake failed; recording continues regardless")
 
 
 class KioskController:
@@ -462,6 +492,7 @@ class KioskController:
         self._update_freshness(now)
 
         self.state = State.RECORDING
+        set_keep_awake(True)
         logger.info(
             "recording started: session_dir=%s instrument=%s",
             self._recorder.session_dir,
@@ -551,6 +582,7 @@ class KioskController:
             )
 
     def stop_recording(self) -> dict:
+        set_keep_awake(False)
         if self.state != State.RECORDING:
             raise RuntimeError(f"cannot stop recording from state {self.state}")
 
@@ -589,6 +621,7 @@ class KioskController:
         return session_info
 
     def _fail(self, message: str) -> None:
+        set_keep_awake(False)
         logger.error("recording failed: %s", message)
         self.error_message = message
         if self._recorder is not None:
