@@ -481,27 +481,41 @@ class KioskWindow(QMainWindow):
             return
 
         self._reviewed_session = session_dir
-        while True:
-            self._with_preview_paused(
-                lambda: open_session(session_dir, parent=self, on_export=self._on_exported)
-            )
+
+        def confirm_close(dialog) -> bool:
+            """Let the viewer close only once this recording is settled.
+
+            Asked while the window is still up, so "Save it now" simply
+            leaves it open on the Export button -- nothing closes and
+            reopens. Closing the viewer is the moment the recording is
+            really at risk: it is the only place Export lives, and once it
+            is shut there is no way back. See DECISIONS.md 2026-09-14.
+            """
             if session_dir in self._exported or session_dir in self._discarded:
-                break
-            # Closing the viewer is the moment the recording is really at
-            # risk: it is the only place Export lives, and once it is shut
-            # there is no way back to it. Asking at app-close instead put
-            # the question two screens away from the answer, and named a
-            # button that no longer exists. See DECISIONS.md 2026-09-14.
-            if self._confirm_discard_after_review():
+                return True
+            if self._confirm_discard_after_review(dialog):
                 self._discarded.add(session_dir)
-                break
-            # "Save it now" -- back into the viewer, where Export is.
+                return True
+            return False
+
+        self._with_preview_paused(
+            lambda: open_session(
+                session_dir,
+                parent=self,
+                on_export=self._on_exported,
+                confirm_close=confirm_close,
+            )
+        )
         self._sync_ui()
 
-    def _confirm_discard_after_review(self) -> bool:
+    def _confirm_discard_after_review(self, parent=None) -> bool:
         """True if the student chose to let this recording go. Split out
-        so tests can answer it without a real modal, like the other two."""
-        box = QMessageBox(self)
+        so tests can answer it without a real modal, like the other two.
+
+        Parented to the viewer, not the kiosk, so it appears over the
+        window it is asking about.
+        """
+        box = QMessageBox(parent or self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Save your recording?")
         box.setText(

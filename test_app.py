@@ -313,13 +313,12 @@ class TestAutoReview(unittest.TestCase):
         self.addCleanup(third_person.stop)
         return window, third_person, instrument
 
-    def _answer_save_question(self, window, answers=(True,)):
-        """Stand in for the modal asked when the viewer closes unexported.
-        True means "discard it", which is what ends the review loop."""
-        replies = list(answers)
-        window._confirm_discard_after_review = lambda: (
-            replies.pop(0) if len(replies) > 1 else replies[0]
-        )
+    @staticmethod
+    def _confirm_close_passed_to(mock_open):
+        """The gate the kiosk hands the viewer. With open_session patched
+        the viewer never runs, so a test that wants the close question has
+        to call this itself."""
+        return mock_open.call_args.kwargs["confirm_close"]
 
     @staticmethod
     def _recorded(tmp_root: str, name: str = "2026-01-01_1200") -> Path:
@@ -339,7 +338,6 @@ class TestAutoReview(unittest.TestCase):
             window, _third, _inst = self._window(tmp_root)
             session_dir = self._recorded(tmp_root)
             window.controller.last_session_dir = session_dir
-            self._answer_save_question(window)
 
             with patch("app.open_session") as mock_open:
                 # The live preview must be paused while the modal viewer is
@@ -359,7 +357,6 @@ class TestAutoReview(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_root:
             window, _third, _inst = self._window(tmp_root)
             window.controller.last_session_dir = self._recorded(tmp_root)
-            self._answer_save_question(window)
 
             with patch("app.open_session") as mock_open:
                 window._review_last_session()
@@ -372,7 +369,6 @@ class TestAutoReview(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_root:
             window, _third, _inst = self._window(tmp_root)
 
-            self._answer_save_question(window)
             with patch("app.open_session") as mock_open:
                 window.controller.last_session_dir = self._recorded(tmp_root, "2026-01-01_1200")
                 window._review_last_session()
@@ -410,63 +406,70 @@ class TestAutoReview(unittest.TestCase):
 
             mock_open.assert_not_called()
 
-    def test_closing_the_viewer_unexported_asks_there_and_then(self):
-        """Closing the viewer is the moment the recording is really at
-        risk -- it is the only place Export lives. Asking at app-close put
-        the question two screens away from the answer."""
+    def test_save_it_now_keeps_the_viewer_open(self):
+        """The window must not close and reopen -- changing your mind
+        should cost nothing. False means "do not close"."""
         with tempfile.TemporaryDirectory() as tmp_root:
             window, _third, _inst = self._window(tmp_root)
             window.controller.last_session_dir = self._recorded(tmp_root)
             asked = []
-            window._confirm_discard_after_review = lambda: (asked.append(1), True)[1]
-
-            with patch("app.open_session"):
-                window._review_last_session()
-
-            self.assertEqual(len(asked), 1)
-
-    def test_save_it_now_goes_back_to_the_viewer(self):
-        """The answer has to be actionable: "Save it now" returns them to
-        Export rather than just restating the problem."""
-        with tempfile.TemporaryDirectory() as tmp_root:
-            window, _third, _inst = self._window(tmp_root)
-            window.controller.last_session_dir = self._recorded(tmp_root)
-            # Go back once, then give up.
-            self._answer_save_question(window, answers=(False, True))
+            window._confirm_discard_after_review = lambda parent=None: (
+                asked.append(1), False
+            )[1]
 
             with patch("app.open_session") as mock_open:
                 window._review_last_session()
+                gate = self._confirm_close_passed_to(mock_open)
+                self.assertFalse(gate(None))
 
-            self.assertEqual(mock_open.call_count, 2)
+            self.assertEqual(len(asked), 1)
+            # And the viewer was opened exactly once: no close-and-reopen.
+            self.assertEqual(mock_open.call_count, 1)
 
-    def test_an_exported_session_is_never_asked_about(self):
+    def test_discarding_lets_it_close_and_is_not_asked_again(self):
+        """Being asked twice about the same recording teaches students to
+        click through the question, which is how the real one gets missed."""
+        with tempfile.TemporaryDirectory() as tmp_root:
+            window, _third, _inst = self._window(tmp_root)
+            session_dir = self._recorded(tmp_root)
+            window.controller.last_session_dir = session_dir
+            window._confirm_discard_after_review = lambda parent=None: True
+
+            with patch("app.open_session") as mock_open:
+                window._review_last_session()
+                gate = self._confirm_close_passed_to(mock_open)
+                self.assertTrue(gate(None))
+
+            self.assertIn(session_dir, window._discarded)
+            # Nothing left for app close to raise.
+            self.assertIsNone(window._unexported_session())
+
+            def refuse():
+                raise AssertionError("already answered once")
+
+            window._confirm_discard_unexported = refuse
+            event = QCloseEvent()
+            window.closeEvent(event)
+            self.assertTrue(event.isAccepted())
+
+    def test_an_exported_session_closes_without_being_asked(self):
         with tempfile.TemporaryDirectory() as tmp_root:
             window, _third, _inst = self._window(tmp_root)
             session_dir = self._recorded(tmp_root)
             window.controller.last_session_dir = session_dir
 
-            def refuse():
+            def refuse(parent=None):
                 raise AssertionError("an exported session must not be asked about")
 
             window._confirm_discard_after_review = refuse
 
-            with patch("app.open_session", side_effect=lambda *a, **k: window._on_exported(session_dir)):
+            with patch("app.open_session") as mock_open:
+                mock_open.side_effect = lambda *a, **k: window._on_exported(session_dir)
                 window._review_last_session()
+                gate = self._confirm_close_passed_to(mock_open)
+                self.assertTrue(gate(None))
 
             self.assertIn(session_dir, window._exported)
-
-    def test_discarding_is_not_asked_about_again_at_app_close(self):
-        """Being asked twice about the same recording teaches students to
-        click through the question, which is how the real one gets missed."""
-        with tempfile.TemporaryDirectory() as tmp_root:
-            window, _third, _inst = self._window(tmp_root)
-            window.controller.last_session_dir = self._recorded(tmp_root)
-            self._answer_save_question(window)
-
-            with patch("app.open_session"):
-                window._review_last_session()
-
-            self.assertIsNone(window._unexported_session())
 
             def refuse():
                 raise AssertionError("already answered once")
@@ -490,7 +493,6 @@ class TestAutoReview(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_root:
             window, _third, _inst = self._window(tmp_root)
             window.controller.last_session_dir = self._recorded(tmp_root)
-            self._answer_save_question(window)
             with patch("app.open_session", side_effect=RuntimeError("boom")):
                 with self.assertRaises(RuntimeError):
                     window._review_last_session()
@@ -732,9 +734,6 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
 
                 time.sleep(0.2)  # real frames, so nothing looks stalled
                 now[0] = 15 * 60.0
-                # Reaching the limit ends a session, so the viewer opens and
-                # the save question follows it. Discard, to end the review.
-                window._confirm_discard_after_review = lambda: True
                 with patch("app.open_session") as mock_open:
                     window._poll_tick()
 

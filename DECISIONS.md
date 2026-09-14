@@ -5189,3 +5189,37 @@ test that patches `app.open_session` but forgets this one hangs.
 
 ---
 
+## 2026-09-14 — The save question refuses the close, rather than following it
+
+**Decided:** refine the entry above. `ViewerDialog` takes a
+`confirm_close` callback and will not close until it agrees, so the
+question appears **over** the viewer and "Save it now" simply leaves the
+window where it was. The reopen loop is gone.
+
+**Why:** asking after the window had already gone meant close, prompt,
+reopen — three states for what is one decision, and the reopen read as the
+app undoing itself. Refusing the close is what every application does with
+unsaved work, so it needs no explaining.
+
+**Gated in two places, and this is the part to not undo:**
+
+- `done()`, because Esc and `reject()` never deliver a `QCloseEvent` —
+  gating `closeEvent()` alone would let the keyboard straight through.
+- `closeEvent()`, *before* `_shutdown()`, which releases the PyAV
+  decoders. Gating after it would leave the window open on a dead session.
+
+Qt makes the pair safe: `QDialog::closeEvent` ignores the event itself if
+`reject()` did not hide the dialog.
+
+**The answer latches** (`_close_allowed`), because one click on the X
+reaches the dialog twice — `closeEvent`, then the `reject()` it delegates
+to — and a student must not be asked the same question twice for one
+click. Verified on a real dialog, not reasoned about: X and Esc each keep
+it open, the decoders stay live, and one X click asks once.
+
+**Consequence for tests:** with `app.open_session` patched the viewer never
+runs, so the question is never reached. A test that wants it pulls the
+callback out of the call (`_confirm_close_passed_to`) and calls it.
+
+---
+

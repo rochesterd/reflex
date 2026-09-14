@@ -121,13 +121,19 @@ class ViewerDialog(QDialog):
     "settings.py Preview leaked the IDS device" entry is about.
     """
 
-    def __init__(self, session: Session, parent=None, on_export=None):
+    def __init__(self, session: Session, parent=None, on_export=None, confirm_close=None):
         super().__init__(parent)
         self.session = session
         # Called with the written path when an export finishes. The kiosk
         # uses it to tell an exported session from one its buffer is about
         # to delete (see app.py); standalone viewer.exe passes nothing.
         self._on_export = on_export
+        # Called with this dialog when something tries to close it; return
+        # False to keep it open. The kiosk uses it to ask about saving
+        # while the student can still act on the answer -- see app.py's
+        # _review_last_session() and DECISIONS.md 2026-09-14.
+        self._confirm_close = confirm_close
+        self._close_allowed = False
         self.setWindowTitle(f"Recording - {session.directory.name}")
         self.setSizeGripEnabled(True)
 
@@ -415,7 +421,29 @@ class ViewerDialog(QDialog):
         if player is not None:
             player.close()
 
+    def _may_close(self) -> bool:
+        """Whether this dialog may close. Asked at most once: the answer
+        latches, because the window's X reaches here twice (closeEvent,
+        then the reject() it delegates to) and a student must not be put
+        the same question twice for one click."""
+        if self._close_allowed or self._confirm_close is None:
+            return True
+        self._close_allowed = bool(self._confirm_close(self))
+        return self._close_allowed
+
+    def done(self, result: int) -> None:
+        """Every way a QDialog closes funnels through here -- Esc and
+        reject() included, neither of which delivers a QCloseEvent."""
+        if not self._may_close():
+            return
+        super().done(result)
+
     def closeEvent(self, event) -> None:
+        # Gate *before* _shutdown(): it releases the PyAV decoders, and a
+        # dialog that then stays open would be showing a dead session.
+        if not self._may_close():
+            event.ignore()
+            return
         self._shutdown()
         super().closeEvent(event)
 
@@ -545,13 +573,17 @@ def _release(dialog: QDialog) -> None:
     dialog.deleteLater()
 
 
-def open_session(session_dir: Path | str, parent=None, on_export=None) -> bool:
+def open_session(
+    session_dir: Path | str, parent=None, on_export=None, confirm_close=None
+) -> bool:
     """Load and show a session modally, reporting a bad session with a
     dialog rather than a traceback. True if it opened.
 
     `on_export` is called with the written path each time an export
     succeeds -- the kiosk's way of learning that a session has been taken
-    somewhere that outlives its buffer.
+    somewhere that outlives its buffer. `confirm_close` can refuse a close,
+    which is how the kiosk asks about saving without the window going away
+    first.
     """
     try:
         session = Session.load(session_dir)
@@ -559,7 +591,9 @@ def open_session(session_dir: Path | str, parent=None, on_export=None) -> bool:
         QMessageBox.warning(parent, "Can't open this recording", str(exc))
         logger.warning("could not open session %s: %s", session_dir, exc)
         return False
-    dialog = ViewerDialog(session, parent=parent, on_export=on_export)
+    dialog = ViewerDialog(
+        session, parent=parent, on_export=on_export, confirm_close=confirm_close
+    )
     dialog.resize(*DEFAULT_CANVAS)
     try:
         dialog.exec()

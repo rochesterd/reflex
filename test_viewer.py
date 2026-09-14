@@ -320,6 +320,72 @@ def _drive(letter: str, label: str = "") -> Drive:
     return Drive(path=Path(f"{letter}/"), label=label, free_bytes=8_000_000_000)
 
 
+class ViewerCloseGateTest(unittest.TestCase):
+    """`confirm_close` can refuse a close, which is how the kiosk asks
+    about saving without the window going away first. See viewer.py's
+    _may_close() and DECISIONS.md 2026-09-14."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.session_dir = record_session(cls._tmp.name, 1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _dialog(self, confirm_close):
+        dialog = ViewerDialog(Session.load(self.session_dir), confirm_close=confirm_close)
+        self.addCleanup(dialog._shutdown)
+        return dialog
+
+    def test_refusing_keeps_the_window_open_on_every_close_path(self):
+        """Esc and reject() never deliver a QCloseEvent, so gating
+        closeEvent alone would let the keyboard through."""
+        asked = []
+        dialog = self._dialog(lambda _d: (asked.append(1), False)[1])
+        dialog.show()
+
+        dialog.close()
+        self.assertTrue(dialog.isVisible())
+
+        dialog.reject()
+        self.assertTrue(dialog.isVisible())
+
+        self.assertEqual(len(asked), 2)  # once per deliberate attempt
+
+    def test_a_refused_close_leaves_the_decoders_alone(self):
+        """closeEvent releases the PyAV decoders. Gating after that would
+        leave a window open on a dead session."""
+        dialog = self._dialog(lambda _d: False)
+        dialog.show()
+
+        dialog.close()
+
+        self.assertTrue(dialog.isVisible())
+        # Still playable: the player is intact and still answers.
+        self.assertTrue(any(v is not None for v in dialog.player.images().values()))
+
+    def test_one_click_on_the_x_asks_once(self):
+        """closeEvent delegates to reject(), so the question reaches this
+        dialog twice for one click unless the answer latches."""
+        asked = []
+        dialog = self._dialog(lambda _d: (asked.append(1), True)[1])
+        dialog.show()
+
+        dialog.close()
+
+        self.assertFalse(dialog.isVisible())
+        self.assertEqual(len(asked), 1)
+
+    def test_no_gate_means_the_old_behaviour(self):
+        """standalone viewer.exe passes nothing and must close normally."""
+        dialog = self._dialog(None)
+        dialog.show()
+        dialog.close()
+        self.assertFalse(dialog.isVisible())
+
+
 class SessionPickerTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
