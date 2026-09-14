@@ -59,7 +59,7 @@ machines.
 | Steps below | 2, 3, 4, 5 | 2, 6 |
 
 The clinic installer deliberately does **not** ship `viewer.exe`:
-`app.exe` already contains the viewer (Watch Last Recording opens it from
+`app.exe` already contains the viewer (stopping a recording opens it from
 inside the kiosk), so a second PySide6+OpenCV+PyAV tree would add hundreds
 of MB for no capability that machine lacks.
 

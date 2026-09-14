@@ -8,15 +8,16 @@
 # "Recorder/Viewer split, phase 4: two installers" entry.
 #
 # The clinic installer deliberately does NOT ship this exe: app.exe already
-# contains the viewer (app.py imports viewer.py, so Watch and Past
-# recordings work from inside the kiosk), and bundling a second full
+# contains the viewer (app.py imports viewer.py, so stopping a recording
+# opens it from inside the kiosk), and bundling a second full
 # PySide6+cv2+av tree would add hundreds of MB to an installer that's
 # already ~490MB for no capability the clinic machine lacks.
 #
 # `excludes` below is an assertion, not a size optimisation. viewer.py's
 # import graph -- viewer -> session_reader/session_export -> recorder
 # (constants only via session_format) -> av, camera -> plus compositor,
-# qt_image, config -- reaches nothing camera-facing. Naming those modules
+# qt_image and session_buffer (stdlib only) -- reaches nothing
+# camera-facing. Naming those modules
 # here means that stops being something to re-check by eye: if a future
 # edit makes the viewer import ids_camera or uvc_enumeration, this build
 # fails loudly instead of silently gaining a 300MB SDK dependency the

@@ -46,9 +46,9 @@ from PySide6.QtWidgets import (
 
 from app_icon import ICON_VIEWER, icon_path
 from compositor import LAYOUT_MODES, LAYOUT_TITLES, compose_layout
-from session_buffer import default_export_dir, removable_drives_detailed
 from qt_image import bgr_to_pixmap
 import reflex_style
+from session_buffer import default_export_dir, removable_drives_detailed
 from session_export import ExportCancelled, default_export_name, export_session
 from session_reader import Session, SessionError, SessionPlayer, list_sessions
 
