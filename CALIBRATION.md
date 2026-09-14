@@ -100,9 +100,10 @@ That line is the whole check. Compare it against this:
 | `<-- BELOW the 30fps recording target, and blurs motion. Add light at the instrument.` | **Don't accept it.** Turn the instrument's illumination up, or open its aperture, and press Auto-Calibrate again. If you save this, students get juddery, blurred recordings of exactly the hand movement they're trying to study. |
 | `Couldn't reach target brightness automatically` | Use the **Exposure** slider by hand: raise it until the bright part of the picture looks bright but not washed out to white. Keep **Gain** as low as you can — gain adds grain. |
 
-A high gain number (say, above half the "of X max" figure) with plenty of
-light available usually means the instrument's illumination is lower than
-it needs to be. More light at the instrument always beats more gain.
+Normal gain depends on the instrument. The slit lamp (4x ceiling, bright
+beam) should sit at 1–2x; near 4x means too little light. The BIO's view is
+far dimmer at the sensor, so gain in the teens of its 25x is normal, not a
+warning. On either, a grainy picture wants more light, never more gain.
 
 ### 6. Close Preview and repeat for the other instrument
 
