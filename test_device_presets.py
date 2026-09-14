@@ -7,10 +7,12 @@ from __future__ import annotations
 import unittest
 
 from camera import ORIENTATION_FLIP_VERTICAL, ORIENTATION_NONE, ORIENTATION_ROTATE_180
+from exposure_calibration import METERING_FIELD, METERING_HIGHLIGHT, VALID_METERING
 from device_presets import (
     CUSTOM_PROFILE_ID,
     PROFILES,
     black_level_for_model,
+    metering_for_model,
     orientation_for_model,
     pixel_clock_hz_for_model,
     profile_for_id,
@@ -134,6 +136,26 @@ class ProfileRegistryTest(unittest.TestCase):
                 with self.subTest(token=token):
                     self.assertEqual(orientation_for_model(token), profile.orientation)
                     self.assertEqual(pixel_clock_hz_for_model(token), profile.pixel_clock_hz)
+                    self.assertEqual(metering_for_model(token), profile.metering)
+
+
+class MeteringForModelTest(unittest.TestCase):
+    """A slit beam is the brightest 0.1% of the frame; the BIO's field is
+    a lit disc whose brightest 0.1% is sparkle. See DECISIONS.md 2026-09-14."""
+
+    def test_the_slit_lamp_meters_the_beam(self):
+        self.assertEqual(metering_for_model("UI325xCP-C"), METERING_HIGHLIGHT)
+
+    def test_the_keeler_meters_the_field(self):
+        self.assertEqual(metering_for_model("U3-327xCP-C"), METERING_FIELD)
+
+    def test_an_unknown_model_keeps_the_old_rule(self):
+        self.assertEqual(metering_for_model("SomeOtherCamera"), METERING_HIGHLIGHT)
+        self.assertEqual(metering_for_model(None), METERING_HIGHLIGHT)
+
+    def test_every_profile_names_a_valid_rule(self):
+        for profile in PROFILES:
+            self.assertIn(profile.metering, VALID_METERING, profile.id)
 
 class BlackLevelForModelTest(unittest.TestCase):
     """The slit lamp's factory black level clips; the Keeler manages its own.

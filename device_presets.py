@@ -26,9 +26,9 @@ camera is never locked out and a new instrument never waits on a code
 change. A config.json written before profiles existed -- a typed label and
 no profile id -- *is* a custom entry, which is why that shape stays valid.
 
-Lightweight on purpose -- only imports camera.py (stdlib + numpy) for the
-orientation constants, no Qt / IDS SDK, so it stays importable anywhere
-ids_camera.py is. See DECISIONS.md's "Device-model rotation presets" entry
+Lightweight on purpose -- only imports camera.py and exposure_calibration.py
+(stdlib + numpy) for their constants, no Qt / IDS SDK, so it stays
+importable anywhere ids_camera.py is. See DECISIONS.md's "Device-model rotation presets" entry
 and its orientation-correction follow-up.
 """
 
@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from camera import ORIENTATION_FLIP_VERTICAL, ORIENTATION_NONE, ORIENTATION_ROTATE_180
+from exposure_calibration import METERING_FIELD, METERING_HIGHLIGHT
 
 CUSTOM_PROFILE_ID = "custom"
 
@@ -71,6 +72,12 @@ class DeviceProfile:
     # continuously) and wrong for one whose factory value clips -- see the
     # slit lamp below and DECISIONS.md's 2026-09-13 black-level entry.
     black_level: float | None = None
+    # What Auto-Calibrate steers on (an exposure_calibration.VALID_METERING
+    # member). Which part of the frame *is* the picture differs per
+    # instrument: a slit beam is the brightest 0.1% of an otherwise black
+    # frame, while the BIO's field is a lit disc whose brightest 0.1% is a
+    # specular point far above it. See DECISIONS.md 2026-09-14.
+    metering: str = METERING_HIGHLIGHT
     # One line for the technician, shown under the profile in settings.py.
     note: str = ""
 
@@ -125,6 +132,11 @@ PROFILES: tuple[DeviceProfile, ...] = (
         orientation=ORIENTATION_FLIP_VERTICAL,
         # Reports a fixed, unwritable 197MHz: nothing to set.
         pixel_clock_hz=None,
+        # The highlight rule left this camera's field at a median of 27
+        # with a quarter of the frame pure black, pinned by sparkle at
+        # p99.9 -- measured 2026-09-14. The field rule's numbers are
+        # provisional until confirmed against a model eye.
+        metering=METERING_FIELD,
         note="Calibrate in Preview: its own auto-exposure runs before the instrument is in use.",
     ),
     DeviceProfile(
@@ -183,6 +195,14 @@ def black_level_for_model(model_name: str | None) -> float | None:
     which is every configuration written before profiles existed."""
     profile = profile_for_model(model_name)
     return profile.black_level if profile is not None else None
+
+
+def metering_for_model(model_name: str | None) -> str:
+    """How Auto-Calibrate should meter this model. An unknown model gets
+    the highlight rule, which is what every camera got before profiles
+    carried one."""
+    profile = profile_for_model(model_name)
+    return profile.metering if profile is not None else METERING_HIGHLIGHT
 
 
 def orientation_for_model(model_name: str | None) -> str:

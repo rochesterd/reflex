@@ -11,12 +11,52 @@ import unittest
 import numpy as np
 
 from exposure_calibration import (
+    DEFAULT_SATURATION_LEVEL,
+    METERING_FIELD,
+    METERING_HIGHLIGHT,
     exposure_budget_us,
     center_crop,
     is_converged,
     median_brightness,
+    metering_brightness,
+    metering_target,
     next_exposure_gain,
 )
+
+
+class MeteringModeTest(unittest.TestCase):
+    """The BIO failure of 2026-09-14: a lit field covering half the frame
+    at a dim level, plus a specular speck. The highlight rule reads the
+    speck and calls the frame over-exposed; the field rule reads the
+    field."""
+
+    def _bio_like_frame(self) -> np.ndarray:
+        image = np.zeros((200, 200, 3), dtype=np.uint8)
+        image[:, :100] = 40  # the lit field: half the frame, too dark
+        # 0.16% sparkle: above p99.9's reach (the real one measured 0.08%
+        # saturated plus a bright halo), far below the field rule's 5%.
+        image[0:8, 0:8] = 255
+        return image
+
+    def test_highlight_metering_is_pinned_by_a_speck(self):
+        measured = metering_brightness(self._bio_like_frame(), METERING_HIGHLIGHT)
+        self.assertGreaterEqual(measured, DEFAULT_SATURATION_LEVEL)  # "over-exposed"
+
+    def test_field_metering_reads_the_field(self):
+        measured = metering_brightness(self._bio_like_frame(), METERING_FIELD)
+        self.assertEqual(measured, 40.0)
+        target, tolerance = metering_target(METERING_FIELD)
+        self.assertFalse(is_converged(measured, target, tolerance))  # wants more light
+
+    def test_field_rule_asks_for_more_light_where_highlight_would_halve(self):
+        frame = self._bio_like_frame()
+        for mode, expect_brighter in ((METERING_HIGHLIGHT, False), (METERING_FIELD, True)):
+            with self.subTest(mode=mode):
+                measured = metering_brightness(frame, mode)
+                target, _ = metering_target(mode)
+                exposure, gain = next_exposure_gain(measured, 30_000.0, (24.0, 30_000.0), 4.0, (1.0, 25.4), target=target)
+                self.assertEqual(exposure, 30_000.0)
+                self.assertEqual(gain > 4.0, expect_brighter)
 
 
 class MedianBrightnessTest(unittest.TestCase):

@@ -53,7 +53,15 @@ DEFAULT_EXPOSURE_BUDGET_FRACTION = 0.9
 # question that actually matters: is the beam bright but not clipped?
 METERING_MEDIAN = "median"
 METERING_HIGHLIGHT = "highlight"
-VALID_METERING = (METERING_MEDIAN, METERING_HIGHLIGHT)
+# The BIO's view is the opposite shape from the slit lamp's: a lit disc
+# covering roughly half the frame, whose brightest 0.1% is specular
+# sparkle (the corneal reflex on an eye) far brighter than the field
+# itself. Metering that sparkle at 210 left the field at a median of 27
+# with 23% of the frame pure black and called it calibrated -- measured
+# 2026-09-14, see DECISIONS.md. The field rule meters the bright end of
+# the field instead: a percentile a speck cannot reach.
+METERING_FIELD = "field"
+VALID_METERING = (METERING_MEDIAN, METERING_HIGHLIGHT, METERING_FIELD)
 
 # Which percentile counts as "the highlight", and where to put it. Chosen
 # from a real exposure sweep of the slit lamp beam on a black focus rod
@@ -65,6 +73,16 @@ VALID_METERING = (METERING_MEDIAN, METERING_HIGHLIGHT)
 DEFAULT_HIGHLIGHT_PERCENTILE = 99.9
 DEFAULT_HIGHLIGHT_TARGET = 210.0
 DEFAULT_HIGHLIGHT_TOLERANCE = 20.0
+
+# The field rule's numbers, from a gain sweep of the Keeler at the 30fps
+# budget exposure (2026-09-14): p95 tracked the field's brightness across
+# the whole range (52 -> 248) while p99 and p99.9 were pinned at 255 by
+# gain 8-12; by eye the field was right at gain 14 (p95 184) and blowing
+# out by 20 (p95 248). PROVISIONAL: measured on a glossy box, not a
+# fundus. Confirm against a model eye and update DECISIONS.md.
+DEFAULT_FIELD_PERCENTILE = 95.0
+DEFAULT_FIELD_TARGET = 185.0
+DEFAULT_FIELD_TOLERANCE = 25.0
 
 # At or above this level the metric is *censored*: a clipped highlight says
 # we are over, but not by how much, so a proportional correction crawls
@@ -132,7 +150,7 @@ def metering_brightness(
     image,
     mode: str = METERING_MEDIAN,
     fraction: float = DEFAULT_METERING_FRACTION,
-    percentile: float = DEFAULT_HIGHLIGHT_PERCENTILE,
+    percentile: float | None = None,
 ) -> float:
     """The number a calibration steers on, for the given metering mode.
 
@@ -144,9 +162,14 @@ def metering_brightness(
     the off-centre beam was destroyed. A stray highlight at the rim only
     costs a little underexposure, which is recoverable; blowing out the
     beam is not.
+    METERING_FIELD is the highlight rule at a percentile deep enough into
+    the lit field that a specular point cannot pin it. `percentile`
+    overrides either mode's default.
     """
     if mode == METERING_HIGHLIGHT:
-        return highlight_brightness(image, percentile)
+        return highlight_brightness(image, DEFAULT_HIGHLIGHT_PERCENTILE if percentile is None else percentile)
+    if mode == METERING_FIELD:
+        return highlight_brightness(image, DEFAULT_FIELD_PERCENTILE if percentile is None else percentile)
     return median_brightness(center_crop(image, fraction))
 
 
@@ -154,6 +177,8 @@ def metering_target(mode: str = METERING_MEDIAN) -> tuple[float, float]:
     """(target, tolerance) that go with a metering mode."""
     if mode == METERING_HIGHLIGHT:
         return DEFAULT_HIGHLIGHT_TARGET, DEFAULT_HIGHLIGHT_TOLERANCE
+    if mode == METERING_FIELD:
+        return DEFAULT_FIELD_TARGET, DEFAULT_FIELD_TOLERANCE
     return DEFAULT_TARGET_MEDIAN, DEFAULT_TOLERANCE
 
 

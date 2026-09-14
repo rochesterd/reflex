@@ -95,6 +95,11 @@ Each is a value the hardware already has and Reflex has never written.
 Measure the frame before and after (median, clipped fraction, p99.9) and
 keep the numbers in the DECISIONS entry.
 
+- **Confirm the BIO's field metering against a model eye.** The p95 / 185
+  rule (DECISIONS 2026-09-14) was chosen on a glossy box. Re-run the gain
+  sweep on a fundus target, check the lit fraction through a real pupil,
+  and check noise at the gain it picks. Adjust the numbers or record that
+  they held.
 - **Digital BIO gamma, then its lookup table.** The camera can apply the
   tone curve that would rescue its shadows, on board, for no bandwidth and
   no host CPU. Gamma first because it is one number; the LUT only if one

@@ -85,10 +85,14 @@ from ids_peak import ids_peak
 from ids_peak_ipl import ids_peak_ipl
 
 from camera import BaseCamera
-from device_presets import black_level_for_model, orientation_for_model, pixel_clock_hz_for_model
+from device_presets import (
+    black_level_for_model,
+    metering_for_model,
+    orientation_for_model,
+    pixel_clock_hz_for_model,
+)
 from exposure_calibration import (
     DEFAULT_MAX_ITERATIONS,
-    METERING_HIGHLIGHT,
     center_crop,
     exposure_budget_us,
     is_converged,
@@ -276,9 +280,14 @@ class IdsCamera(BaseCamera):
             # sets the frame period, and ExposureTime's own maximum is
             # derived from it.
             self._apply_pixel_clock()
+            self._select_analog_gain()
             self._apply_black_level()
             self._apply_binning()
             self._apply_pixel_format()
+            # Owned here, every open: a GenICam camera keeps whatever tone
+            # curve the last process left, so without this a student's
+            # brightness setting would leak into the next calibration.
+            self._apply_gamma()
 
             self._width = int(self._node_map.FindNode("Width").Value())
             self._height = int(self._node_map.FindNode("Height").Value())
@@ -380,8 +389,12 @@ class IdsCamera(BaseCamera):
             # clamped to 11.46 and nothing raised it again.
             if self._target_fps is not None:
                 self._apply_frame_rate_cap(self._target_fps)
-            if self._brightness:
-                self.set_brightness(self._brightness)
+            else:
+                self._release_frame_rate_cap()
+            # Gamma is already applied above; only a camera without one
+            # spends light, and only when there is a setting to restore.
+            if self._brightness and not self._has_gamma():
+                self._apply_light(self._brightness)
         except Exception:
             # A failure partway through leaves whatever got opened so far
             # (device, data stream, a running acquisition) dangling with
@@ -573,20 +586,33 @@ class IdsCamera(BaseCamera):
         self._brightness = amount
         if self._node_map is None:
             return  # applied at open instead
+        if not self._apply_gamma():
+            self._apply_light(amount)
 
-        gamma_node = self._node_map.TryFindNode("Gamma")
-        if gamma_node is not None and gamma_node.IsWriteable():
-            wanted = 1.0 + amount * (self._GAMMA_AT_FULL - 1.0)
-            gamma_node.SetValue(
-                min(float(gamma_node.Maximum()), max(float(gamma_node.Minimum()), wanted))
-            )
-            logger.info(
-                "%s: brightness %.0f%% (gamma %.2f)",
-                self.label, amount * 100, gamma_node.Value(),
-            )
-            return
+    def _has_gamma(self) -> bool:
+        node = self._node_map.TryFindNode("Gamma")
+        return node is not None and node.IsWriteable()
 
-        # No tone curve on this camera: spend light instead, exposure first.
+    def _apply_gamma(self) -> bool:
+        """Write the tone curve for the current brightness. False when this
+        camera has no gamma node (the slit lamp), so the caller can spend
+        light instead. Clamped to the node's own range, which is not the
+        documented one: 0.3 was rejected against a minimum of 0.30000001."""
+        if not self._has_gamma():
+            return False
+        gamma_node = self._node_map.FindNode("Gamma")
+        wanted = 1.0 + self._brightness * (self._GAMMA_AT_FULL - 1.0)
+        gamma_node.SetValue(
+            min(float(gamma_node.Maximum()), max(float(gamma_node.Minimum()), wanted))
+        )
+        logger.info(
+            "%s: brightness %.0f%% (gamma %.2f)",
+            self.label, self._brightness * 100, gamma_node.Value(),
+        )
+        return True
+
+    def _apply_light(self, amount: float) -> None:
+        """No tone curve on this camera: spend light instead, exposure first."""
         base_exposure = self._exposure_time_us or self.get_exposure_time_us()
         base_gain = self._gain or 1.0
         exposure, gain = next_exposure_gain(
@@ -604,6 +630,34 @@ class IdsCamera(BaseCamera):
             "%s: brightness %.0f%% (exposure %.1fms, gain %.2fx)",
             self.label, amount * 100, exposure / 1000, gain,
         )
+
+    def _select_analog_gain(self) -> None:
+        """Point `Gain` at the analog stage before anything reads or writes
+        it. The Keeler's selector also offers DigitalAll and per-channel
+        digital gains, and a persisted selector left on one of those would
+        make every gain write here land on the wrong stage -- with a
+        colour cast, not an error. Read 2026-09-14: AnalogAll, as assumed;
+        this makes the assumption a write. The slit lamp's uEye transport
+        offers "All" instead. Best-effort like every optional node."""
+        node = self._node_map.TryFindNode("GainSelector")
+        if node is None or not node.IsAvailable() or not node.IsWriteable():
+            return
+        available = {e.SymbolicValue() for e in node.AvailableEntries()}
+        for wanted in ("AnalogAll", "All"):
+            if wanted in available:
+                node.SetCurrentEntry(wanted)
+                return
+
+    def _release_frame_rate_cap(self) -> None:
+        """No target: let the camera free-run, which means undoing the cap
+        a previous process left. A GenICam camera persists
+        AcquisitionFrameRate, and the Keeler was found holding 20fps from
+        nobody knows what (2026-09-13, again 2026-09-14) -- so "untouched"
+        is not free-running. Settings' Preview is the caller."""
+        rate_node = self._node_map.TryFindNode("AcquisitionFrameRate")
+        if rate_node is None or not rate_node.IsAvailable() or not rate_node.IsWriteable():
+            return
+        rate_node.SetValue(float(rate_node.Maximum()))
 
     def _apply_black_level(self) -> None:
         """Set the sensor's black floor, when a profile or config names one.
@@ -775,7 +829,7 @@ class IdsCamera(BaseCamera):
         tolerance: float | None = None,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         target_fps: float | None = None,
-        metering: str = METERING_HIGHLIGHT,
+        metering: str | None = None,
     ) -> bool:
         """One-shot software auto-exposure, run once when a technician
         clicks settings.py's Auto-Calibrate button (see
@@ -783,6 +837,10 @@ class IdsCamera(BaseCamera):
         real recording. See exposure_calibration.py
         for the actual median-brightness/correction-step math and
         DECISIONS.md's 2026-08-25 calibration entry for the design rationale.
+
+        `metering` defaults to this model's profile rule
+        (device_presets.metering_for_model): what counts as "the picture"
+        differs between a slit beam and the BIO's lit field.
 
         Returns True once within `tolerance` of `target`; False if
         `max_iterations` ran out first (e.g. a scene brighter/darker than
@@ -792,6 +850,8 @@ class IdsCamera(BaseCamera):
         arrives at all, which points at the camera/scene, not the
         algorithm.
         """
+        if metering is None:
+            metering = metering_for_model(self._model_name)
         default_target, default_tolerance = metering_target(metering)
         target = default_target if target is None else target
         tolerance = default_tolerance if tolerance is None else tolerance

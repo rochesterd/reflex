@@ -5261,3 +5261,54 @@ them, and they can only open session folders, which nobody has any more.
 
 ---
 
+## 2026-09-14 — Auto-Calibrate metered the sparkle, not the field
+
+Reported as "no matter what, everything is dark" from Settings' Preview on
+the BIO. Read straight off the camera: nothing persisted was darkening it
+(gamma 1.0, LUT off, `GainSelector` AnalogAll, both autos off, 8-bit). The
+frame at the calibrated 30ms / 4.1× had a median of 2, 18% pure black —
+and p99.9 of 207, which the highlight rule counts as *converged*. The same
+scene at 25.4× was bright and readable. Six times the headroom, unused.
+
+**Why:** the highlight rule (2026-09-08) steers the brightest 0.1% of the
+frame to ~210. On the slit lamp that is the beam, which is the content. On
+the BIO the brightest 0.1% is specular sparkle — on an eye, the corneal
+reflex — far brighter than the lit field around it, so the field stays
+dark to keep a speck under 210. Raising exposure would saturate the speck
+and trigger the halving step, so the algorithm cannot climb. The
+technician then sees exposure already at the 30ms ceiling, a doc telling
+them to keep gain low, and a dark picture: the report was accurate.
+
+**Decided:** metering is a per-model fact — `DeviceProfile.metering`,
+resolved by `metering_for_model()` like orientation and black level. The
+slit lamp keeps the highlight rule. The Keeler gets `METERING_FIELD`: the
+same percentile rule at p95, deep enough into the lit field that a speck
+cannot reach it, target 185 ± 25. Unknown models keep the highlight rule.
+
+**The numbers, and their status.** Gain sweep at 30ms on a glossy box
+(lit field ~50% of the frame):
+
+| gain | p50 | p90 | p95 | p99 | p99.9 | black | clipped | by eye |
+|---|---|---|---|---|---|---|---|---|
+| 4.0 | 2 | 39 | 52 | 104 | 201 | 23% | 0.07% | dark — where calibration had left it |
+| 10.0 | 5 | 99 | 133 | 241 | 255 | 4% | 1.8% | a touch dim |
+| 14.0 | 7 | 138 | 184 | 255 | 255 | 2% | 3.9% | right |
+| 20.0 | 10 | 196 | 248 | 255 | 255 | 0.3% | 9.8% | left side blowing out |
+| 25.4 | 14 | 242 | 255 | 255 | 255 | 0.1% | 17% | over |
+
+p99 and p99.9 saturate by gain 8–12 and say nothing after; p95 tracks the
+field across the whole range. **Provisional:** a box is not a fundus, and
+the lit fraction may differ through a real pupil. Confirm against a model
+eye before calling this settled; ROADMAP carries the step.
+
+**Two things owned at open while here, both found by reading the camera:**
+`Gamma` is now written on every open (`_apply_gamma()`), where before
+`if self._brightness:` skipped 0.0 and the camera kept whatever the last
+process left — a student's full-brightness 2.4 would have leaked into the
+next calibration. `GainSelector` is set to the analog stage before any
+gain access; it was AnalogAll by luck. And a camera opened with no frame
+rate target (Preview) now releases the persisted cap — the Keeler was
+still holding 20fps.
+
+---
+
