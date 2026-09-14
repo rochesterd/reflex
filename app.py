@@ -187,6 +187,10 @@ class KioskWindow(QMainWindow):
         # about to be lost -- this is what lets closing say so. See
         # session_buffer.py.
         self._exported: set[Path] = set()
+        # Sessions the student was asked about and chose to let go. Kept
+        # apart from _exported because the two mean different things to
+        # anyone reading this later: one was saved, one was given up.
+        self._discarded: set[Path] = set()
         # The session the viewer has already been opened on. Stopping opens
         # it once, not once per poll tick -- stopped_at_time_limit stays set
         # until the next recording starts.
@@ -477,10 +481,44 @@ class KioskWindow(QMainWindow):
             return
 
         self._reviewed_session = session_dir
-        self._with_preview_paused(
-            lambda: open_session(session_dir, parent=self, on_export=self._on_exported)
-        )
+        while True:
+            self._with_preview_paused(
+                lambda: open_session(session_dir, parent=self, on_export=self._on_exported)
+            )
+            if session_dir in self._exported or session_dir in self._discarded:
+                break
+            # Closing the viewer is the moment the recording is really at
+            # risk: it is the only place Export lives, and once it is shut
+            # there is no way back to it. Asking at app-close instead put
+            # the question two screens away from the answer, and named a
+            # button that no longer exists. See DECISIONS.md 2026-09-14.
+            if self._confirm_discard_after_review():
+                self._discarded.add(session_dir)
+                break
+            # "Save it now" -- back into the viewer, where Export is.
         self._sync_ui()
+
+    def _confirm_discard_after_review(self) -> bool:
+        """True if the student chose to let this recording go. Split out
+        so tests can answer it without a real modal, like the other two."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Save your recording?")
+        box.setText(
+            "This recording has not been saved to a drive.\n\n"
+            "Reflex does not keep recordings: this one is deleted when you "
+            "close the app, and cannot be recovered."
+        )
+        # Saving is the default button, the escape key, and what closing the
+        # dialog outright does (clickedButton() is then None, which is not
+        # `discard`). The destructive choice should never be the one a
+        # distracted student reaches by reflex or by accident.
+        save = box.addButton("Save it now", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Discard it", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(save)
+        box.setEscapeButton(save)
+        box.exec()
+        return box.clickedButton() is discard
 
     def _on_exported(self, _out_path: Path) -> None:
         """The student saved this session somewhere that outlives the app."""
@@ -663,10 +701,7 @@ class KioskWindow(QMainWindow):
             if Path(self.controller.last_session_dir) in self._exported:
                 parts.append("saved to your drive")
             else:
-                parts.append(
-                    "NOT saved yet - press Watch Last Recording, then Export video, "
-                    "to save it to your drive"
-                )
+                parts.append("NOT saved - this recording is deleted when Reflex closes")
         return "  |  ".join(parts)
 
     def _unexported_session(self) -> Path | None:
@@ -675,7 +710,7 @@ class KioskWindow(QMainWindow):
         if session_dir is None:
             return None
         session_dir = Path(session_dir)
-        if session_dir in self._exported:
+        if session_dir in self._exported or session_dir in self._discarded:
             return None
         # A session with no manifest cannot be opened or exported, so
         # warning about losing it would ask the student to do something
@@ -683,14 +718,19 @@ class KioskWindow(QMainWindow):
         return session_dir if (session_dir / MANIFEST_NAME).exists() else None
 
     def _confirm_discard_unexported(self) -> bool:
-        # Split out from closeEvent() for the same reason as
-        # _confirm_stop_and_exit(): tests monkeypatch it.
+        """The backstop, for a session the student was never asked about --
+        one that finalized but whose viewer never opened. The normal route
+        is _confirm_discard_after_review(), which asks while they can still
+        do something about it.
+
+        Split out from closeEvent() for the same reason as
+        _confirm_stop_and_exit(): tests monkeypatch it.
+        """
         reply = QMessageBox.question(
             self,
             "This recording hasn't been saved",
-            "Your recording has not been saved to a drive yet, and closing "
+            "Your recording has not been saved to a drive, and closing "
             "Reflex deletes it permanently.\n\n"
-            "Press Watch Last Recording, then Export video, to save it first.\n\n"
             "Close Reflex and delete the recording?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

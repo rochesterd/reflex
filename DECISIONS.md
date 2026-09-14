@@ -5150,3 +5150,42 @@ not to narrow the range.
 
 ---
 
+## 2026-09-14 — The save question belongs at viewer close
+
+**Decided:** when the student closes the auto-opened viewer without having
+exported, ask right there — "Save it now" or "Discard it" — and take
+"Save it now" straight back into the viewer. The app-close prompt stays
+only as a backstop for a session nobody was ever asked about.
+
+**Why:** the prompt fired when the student closed the *app*, which is
+after they have closed the viewer. By then the question was unanswerable:
+the viewer is the only place Export lives and there is no way to reopen
+it, so the warning told them they were about to lose something and offered
+no means of not losing it. That is the same failure this codebase already
+rejected for manifest-less sessions — never ask a student to do something
+they have no way to do.
+
+It also still said "press Watch Last Recording, then Export video", naming
+a button deleted earlier the same day when stopping began opening the
+viewer by itself. A prompt that names a control that does not exist is
+worse than no prompt: it reads as the app being broken.
+
+**Why not simply reword it:** the timing was the defect. Closing the viewer
+is the moment the recording is actually at risk, and it is the moment the
+student still has the means to act.
+
+**Asked once, not twice.** A deliberate discard is remembered
+(`_discarded`), so app close does not raise it again. Being asked the same
+question twice teaches students to click through it, which is how the one
+that matters gets missed.
+
+**Everything unsafe is on the far side of an explicit choice:** "Save it
+now" is the default button, the escape key, and what closing the dialog
+outright does — `clickedButton()` is then None, which is not `discard`.
+
+**Consequence for tests:** anything that lets a session finish now meets
+this modal. `test_app.py`'s `_answer_save_question()` stands in for it; a
+test that patches `app.open_session` but forgets this one hangs.
+
+---
+
