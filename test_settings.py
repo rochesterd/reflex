@@ -654,6 +654,31 @@ class PreviewDialogTest(unittest.TestCase):
             PreviewDialog(camera, "Test")
         self.assertIsNone(camera._thread)  # released despite the raise
 
+    def test_the_whole_frame_is_shown_scaled_to_the_window(self):
+        """A QLabel never scales its pixmap, so a native 1600x1200 frame
+        once showed as a cut-out of itself -- useless for calibrating."""
+        import numpy as np
+
+        from camera import Frame
+        from settings import PreviewDialog
+
+        image = np.full((1200, 1600, 3), 255, dtype=np.uint8)
+        image[:200, :200] = (0, 0, 255)  # red top-left corner, BGR
+        camera = SyntheticCamera(160, 120, fps=30)
+        dialog = PreviewDialog(camera, "Test")
+        try:
+            camera.get_latest = lambda: Frame(image=image, timestamp=0.0, index=0)
+            dialog.video_label.resize(480, 360)
+            dialog._update()
+
+            pixmap = dialog.video_label.pixmap()
+            self.assertEqual((pixmap.width(), pixmap.height()), (480, 360))
+            corner = pixmap.toImage().pixelColor(5, 5)
+            self.assertEqual((corner.red(), corner.green(), corner.blue()), (255, 0, 0))
+            self.assertEqual(dialog.status_label.text(), "1600x1200")  # still the native size
+        finally:
+            dialog.close()
+
     def test_camera_without_supports_manual_calibration_shows_no_calibration_controls(self):
         from settings import PreviewDialog
 

@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 
 from app_icon import ICON_SETTINGS, icon_path
 from camera import BaseCamera
+from compositor import fit_into_canvas
 from config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_RECORDING_FPS,
@@ -242,6 +243,11 @@ class PreviewDialog(QDialog):
         self.final_exposure_time_us = initial_exposure_time_us
         self.final_gain = initial_gain
 
+        # Resizable and maximizable: calibrating means judging the whole
+        # view, and the more of the screen it gets the easier that is.
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setSizeGripEnabled(True)
+
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setMinimumSize(480, 360)
@@ -255,7 +261,8 @@ class PreviewDialog(QDialog):
         self.calibration_status_label.setWordWrap(True)
 
         layout = QVBoxLayout()
-        layout.addWidget(self.video_label)
+        # The video takes whatever the window gains; the controls stay put.
+        layout.addWidget(self.video_label, stretch=1)
         layout.addWidget(self.status_label)
 
         try:
@@ -277,6 +284,10 @@ class PreviewDialog(QDialog):
             raise
 
         self.setLayout(layout)
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(int(available.width() * 0.6), int(available.height() * 0.8))
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update)
@@ -419,7 +430,13 @@ class PreviewDialog(QDialog):
             return
         h, w = frame.image.shape[:2]
         self.status_label.setText(f"{w}x{h}")
-        self.video_label.setPixmap(bgr_to_pixmap(frame.image))
+        # Letterboxed to the label, never the native frame: a QLabel does
+        # not scale its pixmap, so a 2048x1536 frame showed as a cut-out
+        # whose position depended on the window -- the whole view, off
+        # centre, is exactly what a technician calibrating can't work with.
+        size = self.video_label.size()
+        canvas = fit_into_canvas(frame.image, (max(160, size.width()), max(120, size.height())))
+        self.video_label.setPixmap(bgr_to_pixmap(canvas))
 
     def _shutdown(self, *_args) -> None:
         """Stop the preview timer and the camera. Idempotent -- reached from
