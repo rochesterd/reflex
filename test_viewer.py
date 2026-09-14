@@ -22,14 +22,14 @@ from session_format import INSTRUMENT_STREAM, THIRD_PERSON_STREAM
 from session_buffer import Drive
 from session_reader import Session
 from test_session_reader import record_session
-from viewer import SessionPickerDialog, ViewerDialog, _mmss
+from viewer import ViewerDialog, _mmss
 
 _qt_app = QApplication.instance() or QApplication([])
 
 
 class DialogLifetimeTest(unittest.TestCase):
-    """The kiosk runs unattended for days, and every Watch / Past recordings
-    press opens a modal dialog parented to its window. Qt parent-child
+    """The kiosk runs unattended for days, and every recording it stops
+    opens a modal dialog parented to its window. Qt parent-child
     ownership would keep each one -- and the full-size QPixmap rendered into
     it -- alive for the life of the process. See DECISIONS.md's 2026-09-09
     entry.
@@ -50,16 +50,6 @@ class DialogLifetimeTest(unittest.TestCase):
         with patch.object(ViewerDialog, "exec", lambda self: 0):
             for _ in range(3):
                 self.assertTrue(viewer.open_session(self.session_dir, parent=parent))
-        _qt_app.processEvents()
-
-        self.assertEqual([c for c in parent.children() if isinstance(c, QDialog)], [])
-
-    def test_browse_sessions_does_not_leave_the_picker_parented(self):
-        parent = QMainWindow()
-        self.addCleanup(parent.deleteLater)
-        with patch.object(SessionPickerDialog, "exec", lambda self: QDialog.DialogCode.Rejected):
-            for _ in range(3):
-                self.assertFalse(viewer.browse_sessions(self._tmp.name, parent=parent))
         _qt_app.processEvents()
 
         self.assertEqual([c for c in parent.children() if isinstance(c, QDialog)], [])
@@ -379,91 +369,11 @@ class ViewerCloseGateTest(unittest.TestCase):
         self.assertEqual(len(asked), 1)
 
     def test_no_gate_means_the_old_behaviour(self):
-        """standalone viewer.exe passes nothing and must close normally."""
+        """Without a gate the dialog closes like any other."""
         dialog = self._dialog(None)
         dialog.show()
         dialog.close()
         self.assertFalse(dialog.isVisible())
-
-
-class SessionPickerTest(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
-
-    def _picker(self, directory=None) -> SessionPickerDialog:
-        picker = SessionPickerDialog(directory or self.root)
-        self.addCleanup(picker.deleteLater)
-        return picker
-
-    def test_lists_recordings_newest_first_with_label_and_duration(self):
-        first = record_session(str(self.root), 1)
-        second = record_session(str(self.root), 1)
-
-        picker = self._picker()
-
-        self.assertEqual(picker.list_widget.count(), 2)
-        rows = [picker.list_widget.item(i).text() for i in range(2)]
-        self.assertIn(second.name.replace("_", " "), rows[0])
-        self.assertIn(first.name.replace("_", " "), rows[1])
-        self.assertIn("BI900", rows[0])  # the instrument label from the manifest
-        self.assertIn("0:0", rows[0])  # a mm:ss duration
-
-    def test_empty_folder_shows_a_placeholder_and_disables_open(self):
-        picker = self._picker()
-
-        self.assertEqual(picker.list_widget.count(), 1)
-        self.assertIn("No recordings", picker.list_widget.item(0).text())
-        self.assertIsNone(picker._selected_directory())
-
-    def test_selecting_and_accepting_returns_the_directory(self):
-        session_dir = record_session(str(self.root), 1)
-        picker = self._picker()
-
-        picker.list_widget.setCurrentRow(0)
-        picker._accept_selection()
-
-        self.assertEqual(picker.selected_directory, session_dir)
-
-    def test_browsing_to_a_folder_of_recordings_reloads_the_list(self):
-        other = self.root / "elsewhere"
-        other.mkdir()
-        record_session(str(other), 1)
-        picker = self._picker()
-        self.assertEqual(picker.list_widget.count(), 1)  # placeholder only
-
-        with patch("viewer.QFileDialog.getExistingDirectory", return_value=str(other)):
-            picker._on_browse()
-
-        self.assertIsNone(picker.selected_directory)  # a folder, not a pick
-        self.assertEqual(picker.list_widget.count(), 1)
-        self.assertIn("BI900", picker.list_widget.item(0).text())
-
-    def test_browsing_straight_to_one_recording_accepts_it(self):
-        """Pointing at a single session folder rather than the folder
-        containing several is an easy slip -- take it as a pick."""
-        session_dir = record_session(str(self.root), 1)
-        picker = self._picker()
-
-        with patch("viewer.QFileDialog.getExistingDirectory", return_value=str(session_dir)):
-            picker._on_browse()
-
-        self.assertEqual(picker.selected_directory, session_dir)
-
-    def test_cancelling_the_browse_changes_nothing(self):
-        picker = self._picker()
-        before = picker.folder_label.text()
-
-        with patch("viewer.QFileDialog.getExistingDirectory", return_value=""):
-            picker._on_browse()
-
-        self.assertEqual(picker.folder_label.text(), before)
-        self.assertIsNone(picker.selected_directory)
-
-    def test_missing_folder_is_not_an_error(self):
-        picker = self._picker(self.root / "does-not-exist")
-        self.assertIn("No recordings", picker.list_widget.item(0).text())
 
 
 if __name__ == "__main__":

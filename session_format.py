@@ -2,9 +2,7 @@
 (recorder.py) and the readers (session_reader.py, session_export.py).
 
 Its own module so the reader doesn't have to import the writer for three
-constants -- which read oddly, and drags the whole encoder path into the
-viewer-only build (see DECISIONS.md's "Recorder/Viewer split, phase 4").
-Pure stdlib, no imports at all.
+constants, which would read oddly. Pure stdlib, no imports at all.
 
 A session directory holds:
 

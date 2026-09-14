@@ -1,11 +1,10 @@
 # PACKAGING.md
 
-How to build Reflex's two distributable installers — the clinic-machine
-one and the viewer-only one (see "Two installers" below). This is a
-**developer-only** procedure — nobody installing Reflex does any of
-this, they just run the `.exe` it produces. See DECISIONS.md's 2026-08-20
-"Frozen-exe installer built" and 2026-09-02 "Recorder/Viewer split, phase
-4: two installers" entries for why these exist.
+How to build Reflex's installer. This is a **developer-only** procedure —
+nobody installing Reflex does any of this, they just run the `.exe` it
+produces. See DECISIONS.md's 2026-08-20 "Frozen-exe installer built" entry
+for why it exists, and 2026-09-14's "The standalone viewer is gone" for
+why there is no second, viewer-only one any more.
 
 For setting up a *development* machine to work on Reflex's source
 instead, see `SETUP.md` — that's a different audience and a different
@@ -44,37 +43,14 @@ build. Install the SDK first; the WDK checks for it as a prerequisite.
 
 Clinic machines need none of this — only the three files step 2b produces.
 
-## Two installers
-
-This procedure produces **two** distributables, for two different
-machines.
-
-| | `reflex-setup.exe` | `reflex-viewer-setup.exe` |
-|---|---|---|
-| For | the clinic room machine | a student's or instructor's own laptop |
-| Contains | `app.exe`, `settings.exe` | `viewer.exe` |
-| IDS peak SDK | bundled, installed silently | none |
-| Size | ~490 MB | ~90 MB |
-| Privileges | admin | none (per-user) |
-| Steps below | 2, 3, 4, 5 | 2, 6 |
-
-The clinic installer deliberately does **not** ship `viewer.exe`:
-`app.exe` already contains the viewer (stopping a recording opens it from
-inside the kiosk), so a second PySide6+OpenCV+PyAV tree would add hundreds
-of MB for no capability that machine lacks.
-
 ## 2. Freeze the entry points
 
 ```powershell
 python -m PyInstaller --distpath packaging\dist --workpath packaging\build packaging\app.spec
 python -m PyInstaller --distpath packaging\dist --workpath packaging\build packaging\settings.spec
-python -m PyInstaller --distpath packaging\dist --workpath packaging\build packaging\viewer.spec
 ```
 
-(Only `viewer.spec` is needed for the viewer-only installer; only the
-other two for the clinic one.)
-
-All three specs are checked into git (`packaging/*.spec`) — this isn't a
+Both specs are checked into git (`packaging/*.spec`) — this isn't a
 from-scratch step, just replaying a known-working build. See
 `DECISIONS.md`'s entry on this for what was actually verified and why
 no hidden-imports/`--collect-all` overrides were needed. If a future IDS
@@ -82,22 +58,11 @@ peak SDK or dependency version bump breaks the build, start by reading
 the PyInstaller warnings file it writes to `packaging/build/<name>/
 warn-<name>.txt`.
 
-`viewer.spec` lists `ids_peak`, `ids_peak_ipl`, `pygrabber` and
-`comtypes` in `excludes`. That's an assertion, not a size tweak: if a
-future edit makes `viewer.py` reach anything camera-facing, this build
-fails loudly rather than silently gaining an SDK dependency the review
-machine can't satisfy. Confirmed on the 2026-09-02 build — the frozen
-`viewer.exe` contains none of `recorder`, `camera`, `kiosk`,
-`ids_camera` or `uvc_camera`.
-
 **Verify before continuing**, not just "did it build without error":
 
 - `packaging\dist\app\app.exe --synthetic` and
   `packaging\dist\settings\settings.exe` must open with no import/DLL
   errors.
-- `packaging\dist\viewer\viewer.exe <a session folder>` must play it, and
-  `viewer.exe` with no arguments must show the picker, opened on the home
-  folder and listing nothing — the correct path, not a failure.
 - Each exe must show its icon in Explorer **and** in its own title bar
   once running — those are two different mechanisms (exe resource vs.
   the bundled `.ico`), so one can be broken while the other looks fine.
@@ -244,8 +209,7 @@ in Reflex lists. Uninstalling sidebyside (Settings → Apps) is cleaner and
 still fine; its uninstaller removes its own driver package and signing
 certificate. Either way redo `CALIBRATION.md` rather than copying
 `%ProgramData%\sidebyside\config.json` over — it carries an
-unproven calibration. The same shortcut rule
-applies to a laptop's old `sidebyside Viewer`. See DECISIONS.md's
+unproven calibration. See DECISIONS.md's
 2026-09-11 coexistence entry.
 
 **Before handing this to anyone**, actually run it on a real (or
@@ -299,41 +263,3 @@ that finishes the job: assign each role, calibrate each instrument camera
 against a real view through the instrument, and prove the room with one
 test recording. Hand that document over with the installer — it assumes no
 imaging knowledge and no access to this repo.
-
-## 6. Compile the viewer-only installer
-
-Needs only step 2's `viewer.spec` build — no `vendor/` contents, no
-response file, nothing from steps 3–5.
-
-```powershell
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" packaging\reflex-viewer.iss
-```
-
-Produces `packaging\installer_output\reflex-viewer-setup.exe` (~90 MB
-as of 2026-09-02, against the clinic installer's ~490 MB).
-
-This is what goes to a student or instructor who wants to review
-recordings on their own machine. It installs per-user under
-`%LOCALAPPDATA%\Reflex Viewer` with `PrivilegesRequired=lowest`, so
-it raises no UAC prompt and needs no admin rights, and it creates a
-Desktop shortcut — unlike `settings.exe`, students *are* this program's
-audience.
-
-**Before handing it to anyone**, install it on a machine that has never
-had Reflex on it and confirm:
-
-- it installs without prompting for admin,
-- the Desktop shortcut opens the viewer,
-- with no recordings present it shows the picker saying "No recordings in
-  this folder" rather than erroring — the normal state, since recordings
-  never persist anywhere,
-- **"Open a recording folder…" finds a session copied from elsewhere**
-  (a USB stick, Downloads). This is the only path that matters here.
-- playback, the layout picker and Export all work on that copied session.
-
-Both installers use distinct `AppId`s and install locations, so they
-coexist on one machine. Verify that too if you install both: neither
-should uninstall or upgrade over the other. **Never change either
-`AppId`** (`reflex`, `reflex-viewer`) once shipped — it is how Windows
-recognises an existing install as upgradable. Both are pinned rather
-than derived from `AppName`, so the display name can change freely.

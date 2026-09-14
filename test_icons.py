@@ -1,5 +1,5 @@
 """The committed .ico files in assets/: the entry layout
-branding/build_icons.py writes, that every entry decodes, and that the three
+branding/build_icons.py writes, that every entry decodes, and that they
 stay distinguishable from each other (DECISIONS.md's "Three icons, not
 one"). Checks the files themselves rather than the script, so it holds for
 supplied artwork too.
@@ -12,9 +12,9 @@ import unittest
 
 from PySide6.QtGui import QImage
 
-from app_icon import ICON_APP, ICON_SETTINGS, ICON_VIEWER, icon_path
+from app_icon import ICON_APP, ICON_SETTINGS, icon_path
 
-ICONS = (ICON_APP, ICON_VIEWER, ICON_SETTINGS)
+ICONS = (ICON_APP, ICON_SETTINGS)
 EXPECTED_SIZES = (16, 32, 48, 256)
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -68,7 +68,7 @@ class TestIcons(unittest.TestCase):
                     alphas = pixels[3::4]
                     self.assertGreater(sum(a == 255 for a in alphas), len(alphas) // 2)
 
-    def test_the_three_icons_differ(self):
+    def test_the_icons_differ(self):
         for size in (16, 32):
             pixels = {name: _dib_pixels(_entries(name)[size][1], size) for name in ICONS}
             for i, a in enumerate(ICONS):

@@ -918,7 +918,8 @@ def main() -> int:
     # an existing instance before main() runs, so this is a no-op there.
     app = QApplication.instance() or QApplication(sys.argv)
     # Application-wide, so every dialog this process opens (including the
-    # viewer behind Watch, and the setup-required box below) inherits both.
+    # viewer a stopped recording opens, and the setup-required box below)
+    # inherits both.
     app.setWindowIcon(QIcon(str(icon_path(ICON_APP))))
     reflex_style.apply(app)
     try:

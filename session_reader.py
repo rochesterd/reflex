@@ -156,26 +156,6 @@ class Session:
         )
 
 
-def list_sessions(sessions_dir: Path | str) -> list["Session"]:
-    """Every readable session under `sessions_dir`, newest first. A
-    directory that isn't a session, or whose manifest doesn't parse, is
-    skipped with a log line rather than failing the whole listing -- one
-    bad folder must not make the Past-recordings list unusable.
-    """
-    sessions_dir = Path(sessions_dir)
-    if not sessions_dir.is_dir():
-        return []
-    found: list[Session] = []
-    for child in sorted(sessions_dir.iterdir(), reverse=True):
-        if not child.is_dir():
-            continue
-        try:
-            found.append(Session.load(child))
-        except SessionError as exc:
-            logger.info("skipping %s: %s", child.name, exc)
-    return found
-
-
 class _StreamCursor:
     """A decode cursor over one stream, holding the frame that belongs on
     screen at the current media time.

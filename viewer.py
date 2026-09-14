@@ -5,11 +5,8 @@ asked.
 
 A thin PySide6 shell over session_reader.SessionPlayer and
 session_export.export_session, the same split app.py has over kiosk.py.
-Runs two ways from one class:
-
-- inside the kiosk, opened modally by app.py's Watch / Past recordings
-  buttons, and
-- as a standalone viewer.exe for reviewing a session on another machine.
+Opened modally by app.py when a recording stops. There is no standalone
+viewer: see DECISIONS.md's 2026-09-14 "The standalone viewer is gone".
 
 Student-facing, same audience as recording (CLAUDE.md's "Who uses it"):
 play/pause, scrub, a layout picker, and Export. Nothing here can modify or
@@ -19,23 +16,18 @@ delete a recording -- Export only ever writes a new file.
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QInputDialog,
     QProgressDialog,
@@ -44,13 +36,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from app_icon import ICON_VIEWER, icon_path
 from compositor import LAYOUT_MODES, LAYOUT_TITLES, compose_layout
 from qt_image import bgr_to_pixmap
 import reflex_style
 from session_buffer import default_export_dir, removable_drives_detailed
 from session_export import ExportCancelled, default_export_name, export_session
-from session_reader import Session, SessionError, SessionPlayer, list_sessions
+from session_reader import Session, SessionError, SessionPlayer
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +103,7 @@ class ViewerDialog(QDialog):
     """Playback window for one session.
 
     A QDialog rather than a QMainWindow so app.py can open it modally with
-    .exec() (the kiosk's own controls are then unreachable while it's up)
-    while main() can still show it as a standalone top-level window.
+    .exec(): the kiosk's own controls are then unreachable while it's up.
 
     Teardown hangs off the `finished` signal, not closeEvent: Esc routes
     through QDialog.reject(), which never delivers a QCloseEvent, and this
@@ -126,7 +116,7 @@ class ViewerDialog(QDialog):
         self.session = session
         # Called with the written path when an export finishes. The kiosk
         # uses it to tell an exported session from one its buffer is about
-        # to delete (see app.py); standalone viewer.exe passes nothing.
+        # to delete (see app.py).
         self._on_export = on_export
         # Called with this dialog when something tries to close it; return
         # False to keep it open. The kiosk uses it to ask about saving
@@ -448,116 +438,12 @@ class ViewerDialog(QDialog):
         super().closeEvent(event)
 
 
-class SessionPickerDialog(QDialog):
-    """Pick a recording to watch.
-
-    Lists what's in a folder, newest first, and offers a browse button --
-    which the standalone viewer genuinely needs: on a review machine there
-    may be no config.json at all, and recordings will have been copied to
-    a USB stick or Downloads rather than sitting in the default location
-    (see DECISIONS.md's "Recorder/Viewer split, phase 4" entry).
-    """
-
-    def __init__(self, sessions_dir: Path | str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Past recordings")
-        self.setMinimumSize(560, 380)
-        self.selected_directory: Path | None = None
-        self._sessions_dir = Path(sessions_dir)
-
-        self.folder_label = QLabel()
-        self.folder_label.setWordWrap(True)
-
-        self.list_widget = QListWidget()
-        self.list_widget.itemDoubleClicked.connect(lambda _item: self._accept_selection())
-        self.list_widget.itemSelectionChanged.connect(self._update_buttons)
-
-        self.browse_button = QPushButton("Open a recording folder...")
-        self.browse_button.clicked.connect(self._on_browse)
-
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel
-        )
-        self.buttons.accepted.connect(self._accept_selection)
-        self.buttons.rejected.connect(self.reject)
-
-        top = QHBoxLayout()
-        top.addWidget(self.folder_label, stretch=1)
-        top.addWidget(self.browse_button)
-
-        layout = QVBoxLayout()
-        layout.addLayout(top)
-        layout.addWidget(self.list_widget, stretch=1)
-        layout.addWidget(self.buttons)
-        self.setLayout(layout)
-
-        self._reload()
-
-    def _reload(self) -> None:
-        self.list_widget.clear()
-        sessions = list_sessions(self._sessions_dir)
-        self.folder_label.setText(f"Recordings in {self._sessions_dir}")
-        for session in sessions:
-            item = QListWidgetItem(self._describe(session))
-            item.setData(Qt.ItemDataRole.UserRole, str(session.directory))
-            self.list_widget.addItem(item)
-        if sessions:
-            self.list_widget.setCurrentRow(0)
-        else:
-            placeholder = QListWidgetItem("No recordings in this folder.")
-            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.list_widget.addItem(placeholder)
-        self._update_buttons()
-
-    @staticmethod
-    def _describe(session: Session) -> str:
-        date_part = session.directory.name.replace("_", " ")
-        instrument = session.instrument
-        label = instrument.label if instrument else session.instrument_key
-        return f"{date_part}    {label}    {_mmss(session.duration_s)}"
-
-    def _selected_directory(self) -> Path | None:
-        item = self.list_widget.currentItem()
-        if item is None:
-            return None
-        value = item.data(Qt.ItemDataRole.UserRole)
-        return Path(value) if value else None
-
-    def _update_buttons(self) -> None:
-        self.buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(
-            self._selected_directory() is not None
-        )
-
-    def _accept_selection(self) -> None:
-        directory = self._selected_directory()
-        if directory is None:
-            return
-        self.selected_directory = directory
-        self.accept()
-
-    def _on_browse(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(
-            self, "Choose a folder containing recordings", str(self._sessions_dir)
-        )
-        if not chosen:
-            return
-        chosen = Path(chosen)
-        # Tolerate being pointed straight at one recording rather than at
-        # the folder containing several -- an easy and understandable slip.
-        if (chosen / "session.json").is_file():
-            self.selected_directory = chosen
-            self.accept()
-            return
-        self._sessions_dir = chosen
-        self._reload()
-
-
 def _release(dialog: QDialog) -> None:
     """Schedule a finished modal dialog for deletion.
 
     Qt parent-child ownership keeps a dialog alive for the life of its
-    parent, so without this every Watch / Past recordings press would leave
-    another window -- and the full-size QPixmap rendered into it -- attached
+    parent, so without this every recording reviewed would leave another
+    window -- and the full-size QPixmap rendered into it -- attached
     to the kiosk window. The kiosk runs unattended for days at a time, so
     that accumulates. See DECISIONS.md's 2026-09-09 entry.
 
@@ -606,36 +492,3 @@ def open_session(
         dialog._shutdown()
         _release(dialog)
     return True
-
-
-def browse_sessions(sessions_dir: Path | str, parent=None) -> bool:
-    """Show the picker, then open whatever was chosen."""
-    picker = SessionPickerDialog(sessions_dir, parent=parent)
-    try:
-        accepted = picker.exec() == QDialog.DialogCode.Accepted
-        chosen = picker.selected_directory
-    finally:
-        _release(picker)
-    if not accepted or chosen is None:
-        return False
-    return open_session(chosen, parent=parent)
-
-
-def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841 - keeps Qt alive
-    # Standalone viewer.exe only -- opened as a dialog from app.py this
-    # main() never runs, and the dialog inherits the kiosk's icon and style.
-    app.setWindowIcon(QIcon(str(icon_path(ICON_VIEWER))))
-    reflex_style.apply(app)
-
-    if len(sys.argv) > 1:
-        return 0 if open_session(Path(sys.argv[1])) else 1
-    # There is no recordings folder any more -- the kiosk records into a
-    # buffer it deletes (session_buffer.py). Open where a person keeps
-    # files; the picker's "Open a recording folder..." does the rest.
-    return 0 if browse_sessions(Path.home()) else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

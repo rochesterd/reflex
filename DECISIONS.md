@@ -5223,3 +5223,41 @@ callback out of the call (`_confirm_close_passed_to`) and calls it.
 
 ---
 
+## 2026-09-14 — The standalone viewer is gone
+
+**Decided:** `viewer.exe` and its installer are deleted —
+`packaging/viewer.spec`, `packaging/reflex-viewer.iss`,
+`assets/reflex-viewer.ico` — along with the code only they reached:
+`viewer.main()`, `SessionPickerDialog`, `browse_sessions()` and
+`session_reader.list_sessions()`. `ViewerDialog` stays; `app.exe` opens it
+when a recording stops, and that is now the only place a session is
+watched. Reverses 2026-09-02's "Recorder/Viewer split, phase 4: two
+installers", and closes the question the ephemeral buffer (2026-09-13)
+left open in ROADMAP.
+
+**Why:** the viewer-only installer existed so a session folder could be
+reviewed on a machine that didn't record it. Since the buffer, no session
+folder leaves the kiosk. What a student takes away is an exported
+composite, a constant-frame-rate MP4 that any media player opens. A program
+whose only input can no longer exist is upkeep with no user: a second spec,
+a second installer, a third icon, and a fresh-machine checklist phase 4
+never got as far as running.
+
+**What was given up, knowingly:** changing the layout after the fact. The
+layout is chosen at Export. If a student needs two views, they export
+twice; handing out the raw per-camera streams so a viewer of ours can
+recompose them at home is the disclosure the buffer exists to prevent. If
+Panopto lands (ROADMAP), it has its own multi-feed player.
+
+**What goes with it:** `viewer.spec`'s `excludes` asserted that the viewer
+never reaches camera code. Nothing builds the viewer alone any more, so
+there is nothing for it to guard. `session_format.py` keeps no imports
+anyway, since readers still shouldn't import the writer. "Three icons, not
+one" (2026-09-10) is down to two; the settings icon's reason still stands.
+
+**Copies already installed** on a laptop stay until removed from Settings →
+Apps. They have their own `AppId`, so the clinic installer never touches
+them, and they can only open session folders, which nobody has any more.
+
+---
+

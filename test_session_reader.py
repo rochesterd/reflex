@@ -15,7 +15,7 @@ from pathlib import Path
 
 from recorder import Recorder
 from session_format import INSTRUMENT_STREAM, THIRD_PERSON_STREAM
-from session_reader import Session, SessionError, SessionPlayer, list_sessions
+from session_reader import Session, SessionError, SessionPlayer
 from synthetic_camera import SyntheticCamera
 
 FPS = 30
@@ -117,21 +117,6 @@ class SessionLoadTest(unittest.TestCase):
         (d / "third_person.mp4").unlink()
         with self.assertRaises(SessionError):
             Session.load(d)
-
-    def test_list_sessions_is_newest_first_and_skips_junk(self):
-        first = record_session(self.root, 1)
-        second = record_session(self.root, 1)
-        (Path(self.root) / "stray-folder").mkdir()
-        broken = Path(self.root) / "2020-01-01_0000"
-        broken.mkdir()
-        (broken / "session.json").write_text("{not json", encoding="utf-8")
-
-        sessions = list_sessions(self.root)
-
-        self.assertEqual([s.directory.name for s in sessions], [second.name, first.name])
-
-    def test_list_sessions_on_missing_dir_is_empty(self):
-        self.assertEqual(list_sessions(Path(self.root) / "nope"), [])
 
 
 class SessionPlayerTest(unittest.TestCase):

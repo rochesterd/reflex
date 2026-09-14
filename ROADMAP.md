@@ -71,10 +71,6 @@ drive and an upload are the same operation with a different target.
 we cannot place correctly) and any identifier feature (a nickname does not
 make a face less identifying).
 
-**Open question:** if recordings never persist and students keep exported
-composites, what is the viewer-only installer for? A composite plays in any
-media player.
-
 ---
 
 ## 2026-09-12 — Use what each camera's stack actually offers (planned, not built)

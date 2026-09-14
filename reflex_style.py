@@ -4,7 +4,7 @@ Qt's Fusion style with a palette and app-wide font built from
 neco_reflex_theme.py, plus a short stylesheet for what a palette can't say:
 the kiosk's big primary buttons, the selected instrument, the viewer's
 scrubber, secondary text, the brand rule. Applied
-once per process, by app.main() and viewer.main(). settings.py (technician
+once per process, by app.main(). settings.py (technician
 tool) and preview.py (dev tool) deliberately stay native. See DECISIONS.md's
 "The Reflex look" entry for why Fusion rather than a stylesheet for
 everything.

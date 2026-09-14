@@ -1,4 +1,4 @@
-"""Rasterize the Reflex mark into the app's three .ico files.
+"""Rasterize the Reflex mark into the app's .ico files.
 
     .venv\\Scripts\\python.exe branding\\build_icons.py [--preview DIR]
 
@@ -40,7 +40,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPen  # noq
 from PySide6.QtSvg import QSvgRenderer  # noqa: E402
 
 import neco_reflex_theme as theme  # noqa: E402
-from app_icon import ICON_APP, ICON_SETTINGS, ICON_VIEWER  # noqa: E402
+from app_icon import ICON_APP, ICON_SETTINGS  # noqa: E402
 
 SIZES = (16, 32, 48, 256)
 # Entries this size and up are stored PNG-compressed; smaller ones as DIBs.
@@ -65,10 +65,10 @@ class IconSpec:
         return Path(self.filename).stem
 
 
-# Three variants, not one: see DECISIONS.md's "Three icons, not one".
+# One per program, not one for all: see DECISIONS.md's "Three icons, not
+# one", and 2026-09-14's "The standalone viewer is gone" for the third.
 ICONS = (
     IconSpec(ICON_APP, tile=theme.CHARCOAL, mark=theme.OFF_WHITE),
-    IconSpec(ICON_VIEWER, tile=theme.OFF_WHITE, mark=theme.CHARCOAL, edge=theme.SANDSTONE),
     IconSpec(ICON_SETTINGS, tile=theme.CHARCOAL, mark=theme.TAUPE),
 )
 

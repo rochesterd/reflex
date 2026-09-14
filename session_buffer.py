@@ -18,7 +18,7 @@ Three things clear it, and the third is the point of the design:
 This module is 1 and 2; `packaging/reflex.iss` is 3.
 
 No Qt and no camera imports: `app.py`, `recorder.py`'s caller and the
-viewer all need this, including the viewer-only build.
+viewer all need this.
 """
 from __future__ import annotations
 
