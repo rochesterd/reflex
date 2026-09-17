@@ -5341,3 +5341,49 @@ from inside the installer — check the next install with PACKAGING.md's
 `schtasks /Query` line, which now says what to look for.
 
 ---
+## 2026-09-17 — A resting tone curve per camera, and where it runs
+
+First clinic calibration with the field metering: slit lamp 7.8ms / 1.0x,
+BIO 30ms / 9.4x, both with a well-exposed lit area -- and a background
+that goes almost black even in a lit room. That is dynamic range, not
+calibration: the instrument's light is far brighter than the room's, so
+with the lit area placed correctly everything room-lit lands in the bottom
+~25 of 255 levels. On the BIO, dragging Brightness (which *is* the
+camera's Gamma node) was confirmed at the instrument to bring it back.
+
+**Decided:** `DeviceProfile.gamma` is a model's *resting* tone curve, and
+`IdsCamera` decides where it runs: on the camera when it has a Gamma node
+(the Keeler; Brightness then works upward from the resting value), on the
+host otherwise (the slit lamp, whose uEye transport publishes none).
+`DeviceProfile.pixel_format` rides with it for a host-curved camera.
+
+**The host curve runs before the 8-bit conversion** (`_to_bgr8()`), via
+`ids_peak_ipl.GammaCorrector`, which accepts Bayer data directly. Measured
+on a synthetic ramp covering the bottom 10% of the range, gamma 2.0:
+
+| capture | output range | distinct steps |
+|---|---|---|
+| 12-bit, curved before conversion | 4-80 | 77 |
+| 8-bit, same curve | 0-80 | 40 |
+
+Half the steps is visible banding in exactly the region being lifted, so
+the raised format is what makes the curve worth having -- and a test
+holds every profile to "no format without a curve". A highlight at 205
+went to 229: compressed, not clipped. Cost at 1600x1200: 6.9ms a frame
+against 4.4ms today, of a 33ms budget. The corrector's 0.3-3.0 range has
+the same sense as the Keeler's node: above 1.0 lifts shadows.
+
+**Two facts about the binding, both found the hard way.** `get_numpy_3D()`
+is a view that does not keep its Image alive -- a chained one-liner reads
+freed memory and dies with an access violation, no traceback. And
+`IsPixelFormatSupported()` takes the format's *name* constant, not the
+`PixelFormat` object an Image returns. `test_ids_camera.py` covers both;
+it runs against the real image library and skips where it is absent.
+
+**Not decided yet: the two numbers.** Both profiles still say `None`, so
+nothing changes until they are measured -- ROADMAP carries the step, and
+`tools/measure_picture.py` is the sweep. The slit lamp's Brightness still
+spends light rather than curving; whether it should is a separate
+question, since light is real signal and a curve amplifies shadow noise.
+
+---

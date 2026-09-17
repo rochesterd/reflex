@@ -12,7 +12,9 @@ from device_presets import (
     CUSTOM_PROFILE_ID,
     PROFILES,
     black_level_for_model,
+    gamma_for_model,
     metering_for_model,
+    pixel_format_for_model,
     orientation_for_model,
     pixel_clock_hz_for_model,
     profile_for_id,
@@ -137,6 +139,19 @@ class ProfileRegistryTest(unittest.TestCase):
                     self.assertEqual(orientation_for_model(token), profile.orientation)
                     self.assertEqual(pixel_clock_hz_for_model(token), profile.pixel_clock_hz)
                     self.assertEqual(metering_for_model(token), profile.metering)
+                    self.assertEqual(gamma_for_model(token), profile.gamma)
+                    self.assertEqual(pixel_format_for_model(token), profile.pixel_format)
+
+    def test_an_unknown_model_gets_no_tone_curve_or_format(self):
+        self.assertIsNone(gamma_for_model("SomeOtherCamera"))
+        self.assertIsNone(pixel_format_for_model(None))
+
+    def test_a_raised_capture_format_always_comes_with_a_curve(self):
+        """Extra bits are discarded by the 8-bit conversion unless a curve
+        uses them first: a format with no gamma is bandwidth for nothing."""
+        for profile in PROFILES:
+            if profile.pixel_format is not None:
+                self.assertIsNotNone(profile.gamma, profile.id)
 
 
 class MeteringForModelTest(unittest.TestCase):

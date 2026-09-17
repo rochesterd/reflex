@@ -100,30 +100,28 @@ keep the numbers in the DECISIONS entry.
   sweep on a fundus target, check the lit fraction through a real pupil,
   and check noise at the gain it picks. Adjust the numbers or record that
   they held.
-- **Digital BIO gamma, then its lookup table.** The camera can apply the
-  tone curve that would rescue its shadows, on board, for no bandwidth and
-  no host CPU. Gamma first because it is one number; the LUT only if one
-  exponent proves too blunt.
+- **Choose the two resting tone curves.** The mechanism is built
+  (DECISIONS 2026-09-17) and both `DeviceProfile.gamma` values are still
+  `None`. With the camera on the dev laptop and a real view:
+  `tools/measure_picture.py <serial> gamma 1.0 1.4 1.8 2.2 2.6`, adding
+  `--pixel-format BayerRG12` for the slit lamp. Pick by eye for noise as
+  well as by number, then set `gamma` (and the slit lamp's
+  `pixel_format`) in its profile. Recalibrate afterwards: a curve changes
+  what Auto-Calibrate meters. The Keeler's LUT only if one exponent
+  proves too blunt.
 - **Hands camera exposure.** Today the two-second warmup's result is frozen,
   so every session starts from whatever the room looked like. Have
   `settings.py` record the converged value at calibration time and
   `uvc_camera` apply it at every start — a per-room value, so `config.json`
   is its right home.
 
-### Phase 2 — only if Phase 1 is not enough
+### Phase 2 — built; see Phase 1's first step for what remains
 
-Higher bit depth plus a tone curve, and only for a camera that cannot curve
-for itself -- which now means the slit lamp alone, since the Keeler's own
-gamma does the job on board. Phase 0 measured the cost: both cameras hold
-30fps at 12-bit with nothing dropped, for 2x the bandwidth and about 15
-more points of one core.
-
-**The part that is not optional:** `_grab()` converts to BGR8 the moment a
-buffer arrives, so capturing 12-bit and changing nothing else delivers the
-same 248 levels as 8-bit -- measured, not predicted. The curve has to be
-applied *in* that conversion, with `ids_peak_ipl`'s `GammaCorrector` (it
-has `SetDigitalBlack` too), or the extra depth is thrown away a line later.
-If Phase 1 recovers the shadows, write that down and stop here.
+Higher bit depth plus a host tone curve for the slit lamp, the one camera
+that cannot curve for itself, landed 2026-09-17 after the first clinic
+calibration showed room-lit backgrounds going black. Still open here:
+whether the slit lamp's Brightness slider should drive that curve instead
+of spending light, and `GammaCorrector.SetDigitalBlack`, untried.
 
 **Stop conditions worth stating up front:** a measurement that shows no
 improvement ends that step, and the DECISIONS entry records the numbers

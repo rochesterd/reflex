@@ -98,5 +98,10 @@ Answers to what this section used to list as unknown. See DECISIONS.md's
 - **But switching pixel format alone changes nothing downstream.**
   `_grab()` converts each buffer to BGR8 immediately, so a 12-bit capture
   arrives with the same 248 distinct levels as an 8-bit one. The extra bits
-  are only worth anything if a tone curve is applied *during* that
-  conversion -- see ROADMAP's Phase 2.
+  are only worth anything if a tone curve is applied *before* that
+  conversion, which `ids_camera._to_bgr8()` now does.
+- **The host tone curve, measured 2026-09-17** (`ids_peak_ipl`'s
+  `GammaCorrector`, synthetic ramp over the bottom 10% of the range, gamma
+  2.0): a 12-bit capture comes out in 77 distinct steps, an 8-bit one in
+  40. It accepts Bayer 8/10/12 and BGR/RGB directly, range 0.3-3.0, above
+  1.0 lifts shadows. 6.9ms a frame at 1600x1200 against 4.4ms uncurved.

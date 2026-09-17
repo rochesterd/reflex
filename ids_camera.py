@@ -87,7 +87,9 @@ from ids_peak_ipl import ids_peak_ipl
 from camera import BaseCamera
 from device_presets import (
     black_level_for_model,
+    gamma_for_model,
     metering_for_model,
+    pixel_format_for_model,
     orientation_for_model,
     pixel_clock_hz_for_model,
 )
@@ -193,6 +195,7 @@ class IdsCamera(BaseCamera):
         black_level: float | None = None,
         binning: int | None = None,
         pixel_format: str | None = None,
+        gamma: float | None = None,
         converge_auto: bool = True,
     ):
         super().__init__(queue_size=queue_size, label=serial, orientation=orientation)
@@ -223,6 +226,11 @@ class IdsCamera(BaseCamera):
         # depends on it. _grab() reads each buffer's own format, so a
         # higher-depth capture still reaches consumers as BGR8.
         self._pixel_format = pixel_format
+        # The resting tone curve; None means "ask the device-model preset",
+        # like orientation and black level. Applied on the camera when it
+        # has a Gamma node, otherwise in _grab() by this corrector.
+        self._gamma = gamma
+        self._host_corrector = None
         # Per-instrument calibrated values from config.json (InstrumentConfig's
         # optional exposure_time_us/gain fields) -- see DECISIONS.md's
         # 2026-08-25 calibration entry. None means "let _converge_auto_nodes()
@@ -593,15 +601,23 @@ class IdsCamera(BaseCamera):
         node = self._node_map.TryFindNode("Gamma")
         return node is not None and node.IsWriteable()
 
+    def _resting_gamma(self) -> float:
+        resting = self._gamma if self._gamma is not None else gamma_for_model(self._model_name)
+        return float(resting) if resting else 1.0
+
     def _apply_gamma(self) -> bool:
-        """Write the tone curve for the current brightness. False when this
-        camera has no gamma node (the slit lamp), so the caller can spend
-        light instead. Clamped to the node's own range, which is not the
+        """Write the tone curve for the current brightness, from this
+        model's resting value up to _GAMMA_AT_FULL. False when this camera
+        has no gamma node (the slit lamp), so the caller can spend light
+        instead -- that camera's *resting* curve is applied on the host, in
+        _grab(). Clamped to the node's own range, which is not the
         documented one: 0.3 was rejected against a minimum of 0.30000001."""
+        resting = self._resting_gamma()
         if not self._has_gamma():
+            self._set_host_gamma(resting)
             return False
         gamma_node = self._node_map.FindNode("Gamma")
-        wanted = 1.0 + self._brightness * (self._GAMMA_AT_FULL - 1.0)
+        wanted = resting + self._brightness * max(0.0, self._GAMMA_AT_FULL - resting)
         gamma_node.SetValue(
             min(float(gamma_node.Maximum()), max(float(gamma_node.Minimum()), wanted))
         )
@@ -610,6 +626,22 @@ class IdsCamera(BaseCamera):
             self.label, self._brightness * 100, gamma_node.Value(),
         )
         return True
+
+    def _set_host_gamma(self, gamma: float) -> None:
+        """Arm (or disarm, at 1.0) the host-side tone curve _grab() applies
+        before the 8-bit conversion, where a higher-depth capture still has
+        its extra shadow levels. ids_peak_ipl's corrector takes the same
+        0.3-3.0 range with the same sense as the Keeler's node -- above 1.0
+        lifts shadows -- confirmed on a synthetic ramp, 2026-09-17."""
+        if abs(gamma - 1.0) < 1e-6:
+            self._host_corrector = None
+            return
+        corrector = ids_peak_ipl.GammaCorrector()
+        corrector.SetGammaCorrectionValue(
+            min(float(corrector.GammaCorrectionMax()), max(float(corrector.GammaCorrectionMin()), gamma))
+        )
+        self._host_corrector = corrector
+        logger.info("%s: host tone curve, gamma %.2f", self.label, corrector.GammaCorrectionValue())
 
     def _apply_light(self, amount: float) -> None:
         """No tone curve on this camera: spend light instead, exposure first."""
@@ -688,6 +720,8 @@ class IdsCamera(BaseCamera):
         """Best-effort, like the other optional nodes: a camera that doesn't
         offer the requested format keeps its current one rather than failing
         to open."""
+        if not self._pixel_format:
+            self._pixel_format = pixel_format_for_model(self._model_name)
         if not self._pixel_format:
             return
         node = self._node_map.TryFindNode("PixelFormat")
@@ -943,10 +977,7 @@ class IdsCamera(BaseCamera):
         # frame on both real cameras.
         frame_id = buffer.FrameID()
         image = ids_peak_ipl.Image.from_image_view(buffer.ToImageView())
-        converted = image.ConvertTo(ids_peak_ipl.PixelFormatName_BGR8)
-        # Copy out of the converted Image's own buffer before it goes out
-        # of scope, rather than trust an unverified zero-copy lifetime.
-        array = converted.get_numpy_3D().copy()
+        array = _to_bgr8(image, self._host_corrector)
         self._data_stream.QueueBuffer(buffer)
 
         return array, timestamp, frame_id
@@ -965,3 +996,25 @@ class IdsCamera(BaseCamera):
             f"no IDS device with serial {self._serial!r} found "
             f"({len(descriptors)} device(s) present)"
         )
+
+
+def _to_bgr8(image, corrector=None) -> np.ndarray:
+    """One captured Image as a BGR8 array, tone-curved first if asked.
+
+    The curve goes *before* the conversion because that is the only moment
+    a 12-bit capture still has 12 bits: converted first, it arrives with
+    the same levels as an 8-bit one and the curve stretches 40 shadow steps
+    instead of 77 (measured 2026-09-17).
+
+    Every intermediate stays in a local until the pixels are copied out:
+    get_numpy_3D() is a view that does not keep its Image alive, and
+    reading it after the Image is collected is an access violation, not an
+    exception. Process(), not ProcessInPlace(): the input wraps the
+    driver's own buffer.
+    """
+    # The name constant, not the PixelFormat object: the binding rejects the
+    # object with a TypeError (caught by test_ids_camera.py, not hardware).
+    if corrector is not None and corrector.IsPixelFormatSupported(image.PixelFormat().PixelFormatName()):
+        image = corrector.Process(image)
+    converted = image.ConvertTo(ids_peak_ipl.PixelFormatName_BGR8)
+    return converted.get_numpy_3D().copy()

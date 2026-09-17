@@ -78,6 +78,18 @@ class DeviceProfile:
     # frame, while the BIO's field is a lit disc whose brightest 0.1% is a
     # specular point far above it. See DECISIONS.md 2026-09-14.
     metering: str = METERING_HIGHLIGHT
+    # The tone curve this camera rests at; above 1.0 lifts shadows and
+    # compresses highlights rather than clipping them. None means 1.0, a
+    # straight line. Where it is applied is the camera's business, not the
+    # profile's: on board when the camera has a Gamma node (the Keeler),
+    # otherwise on the host during the 8-bit conversion (the slit lamp).
+    gamma: float | None = None
+    # The capture format, or None for the camera's own (BayerRG8 on both).
+    # Only worth raising together with `gamma` on a camera that curves on
+    # the host: the extra bits exist solely to give the curve real shadow
+    # levels to stretch -- measured 77 steps against 40 -- and are thrown
+    # away by the 8-bit conversion otherwise. See DECISIONS.md 2026-09-17.
+    pixel_format: str | None = None
     # One line for the technician, shown under the profile in settings.py.
     note: str = ""
 
@@ -195,6 +207,18 @@ def black_level_for_model(model_name: str | None) -> float | None:
     which is every configuration written before profiles existed."""
     profile = profile_for_model(model_name)
     return profile.black_level if profile is not None else None
+
+
+def gamma_for_model(model_name: str | None) -> float | None:
+    """The tone curve this model rests at, or None for a straight line."""
+    profile = profile_for_model(model_name)
+    return profile.gamma if profile is not None else None
+
+
+def pixel_format_for_model(model_name: str | None) -> str | None:
+    """The capture format this model should use, or None for its own."""
+    profile = profile_for_model(model_name)
+    return profile.pixel_format if profile is not None else None
 
 
 def metering_for_model(model_name: str | None) -> str:
