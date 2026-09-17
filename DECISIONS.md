@@ -5470,3 +5470,24 @@ is the normal case. It now allows 0.1%.
 resolution at the gain it runs at.
 
 ---
+## 2026-09-17 — Clinic-machine pass of build 0176672
+
+Installed over the previous build on NECO4319 and walked end to end by the
+developer; everything worked. This closes the "not yet verified" notes in
+the entries since 2026-09-13, none of which had run frozen on a real
+machine before:
+
+- the buffer sweep task as registered by `register_cleanup_task.ps1` from
+  inside the installer (no battery restriction, ten-minute limit);
+- Settings' Preview showing the whole frame, and both tone curves -- the
+  slit lamp's 12-bit host curve and the Keeler's on-camera gamma;
+- Auto-Calibrate metering with the curve off and landing where the
+  earlier linear calibrations had;
+- stopping opens the viewer; closing it unexported asks over the viewer;
+  Export with one drive and with two; the buffer empty after exit;
+- a slit lamp recording made through the 12-bit path, played back.
+
+Still provisional, as their own entries say: the curve and metering
+numbers were chosen on a focus rod, skin and a glossy box, not an eye.
+
+---
