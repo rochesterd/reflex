@@ -5312,3 +5312,32 @@ still holding 20fps.
 
 ---
 
+## 2026-09-17 — The logon sweep must be allowed to run on battery
+
+**Decided:** the installer registers "Reflex buffer cleanup" from
+`packaging/register_cleanup_task.ps1` (`Register-ScheduledTask`) instead of
+a `schtasks.exe /Create` line.
+
+**Why:** the first clinic install of the ephemeral-buffer build showed the
+task registered and working — `/Run` emptied the buffer — but with
+`Power Management: Stop On Battery Mode, No Start On Batteries`. Those are
+`schtasks /Create`'s defaults and it has no flag to change them. The sweep
+exists for the crash and the *power cut*, which is exactly when a laptop
+kiosk is on battery at its next logon: the default disables the task in
+the one case it is for.
+
+**Also changed while there:** the execution limit drops from the default
+three days to ten minutes (the sweep takes seconds), and the nested
+`\"`-inside-`""` quoting that PACKAGING.md warned about is gone — the
+script finds the sweep beside itself via `$PSScriptRoot`.
+
+**Severity, honestly:** a backstop to a backstop. The app still clears the
+buffer at its next start; this only closes the window between a power cut
+and that next launch.
+
+**Verified:** the task definition, built unelevated under Windows
+PowerShell 5.1 with `-DefinitionOnly`. **Not yet verified:** registration
+from inside the installer — check the next install with PACKAGING.md's
+`schtasks /Query` line, which now says what to look for.
+
+---

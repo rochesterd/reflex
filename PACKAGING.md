@@ -223,7 +223,8 @@ peak install: native restart page" entry for why the install runs
 choosing "restart now" genuinely restarts the machine. Confirm the buffer
 cleanup task registered — its quoting is only exercised at install time:
 `schtasks /Query /TN "Reflex buffer cleanup" /V /FO LIST` must name
-`clear_reflex_buffer.ps1`, and `/Run` on it must empty the buffer under
+`clear_reflex_buffer.ps1` and show **no** "No Start On Batteries" under
+Power Management, and `/Run` on it must empty the buffer under
 `%LOCALAPPDATA%\Temp\Reflex`. And — on a machine
 that already has a current-enough IDS peak installed — re-running
 `reflex-setup.exe` skips reinstalling it (`IdsPeakAlreadyInstalled` in

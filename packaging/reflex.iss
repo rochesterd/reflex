@@ -97,6 +97,7 @@ Source: "net2860_winusb\reflex_net2860.cer"; DestDir: "{app}\driver"; Flags: ign
 ; thing that clears a buffer left by a crash -- see the script's own header
 ; and session_buffer.py.
 Source: "clear_reflex_buffer.ps1"; DestDir: "{app}\cleanup"; Flags: ignoreversion
+Source: "register_cleanup_task.ps1"; DestDir: "{app}\cleanup"; Flags: ignoreversion
 
 [Icons]
 ; app.exe only on the Desktop -- this is what closes the "how does a
@@ -115,10 +116,13 @@ Name: "{autoprograms}\Reflex Settings"; Filename: "{app}\settings\settings.exe"
 ; that was power-cycled mid-session does not keep two students' faces on
 ; disk until someone next launches the app.
 ;
-; The nested quoting is schtasks', not Inno's: /TR takes one quoted command
-; line, and the path inside it needs \" escapes of its own. Verify after
-; any edit with:  schtasks /Query /TN "Reflex buffer cleanup" /V /FO LIST
-Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""Reflex buffer cleanup"" /RU SYSTEM /SC ONLOGON /TR ""powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \""{app}\cleanup\clear_reflex_buffer.ps1\"""""; StatusMsg: "Registering the recording-buffer cleanup task..."; Flags: runhidden waituntilterminated
+; Registered by a script, not a schtasks.exe line: schtasks cannot allow a
+; task to start on battery, and a power cut is the case this one is for --
+; see register_cleanup_task.ps1. /Force there replaces the task an older
+; install created. Verify after any edit with:
+;   schtasks /Query /TN "Reflex buffer cleanup" /V /FO LIST
+; which must name clear_reflex_buffer.ps1 and show no battery restriction.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\cleanup\register_cleanup_task.ps1"""; StatusMsg: "Registering the recording-buffer cleanup task..."; Flags: runhidden waituntilterminated
 
 [UninstallRun]
 ; Unlike the recordings this installer used to leave alone, the task is
