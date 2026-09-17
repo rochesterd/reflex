@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from config import (
+    ACCESS_MODEL_COHORT,
+    ACCESS_MODEL_PER_STUDENT,
     ConfigError,
     achievable_fps,
     exposure_fps_warnings,
@@ -527,6 +529,78 @@ class RecordingFpsTest(unittest.TestCase):
                 self._write(data)
                 with self.assertRaises(ConfigError):
                     load_config(self.path)
+
+class PanoptoConfigTest(unittest.TestCase):
+    """The upload credentials. Optional, because most machines have none --
+    but present-and-broken must fail at load, not at the moment a student
+    has just finished recording something they cannot record again."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "config.json"
+
+    def _write(self, data: dict) -> None:
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def _with_panopto(self, **overrides) -> dict:
+        data = json.loads(json.dumps(VALID))
+        section = {
+            "host": "neco.hosted.panopto.com",
+            "client_id": "abc",
+            "client_secret": "shh",
+            "parent_folder_id": "folder-1",
+        }
+        section.update(overrides)
+        data["panopto"] = section
+        return data
+
+    def test_absent_section_means_uploads_are_off_not_an_error(self):
+        self._write(VALID)
+        self.assertIsNone(load_config(self.path).panopto)
+
+    def test_a_complete_section_loads(self):
+        self._write(self._with_panopto())
+        panopto = load_config(self.path).panopto
+        self.assertEqual(panopto.host, "neco.hosted.panopto.com")
+        self.assertEqual(panopto.parent_folder_id, "folder-1")
+        self.assertEqual(panopto.access_model, ACCESS_MODEL_COHORT)
+
+    def test_a_pasted_site_url_is_reduced_to_its_hostname(self):
+        for host in (
+            "https://neco.hosted.panopto.com",
+            "https://neco.hosted.panopto.com/",
+            "https://neco.hosted.panopto.com/Panopto/Pages/Home.aspx",
+        ):
+            with self.subTest(host=host):
+                self._write(self._with_panopto(host=host))
+                self.assertEqual(load_config(self.path).panopto.host, "neco.hosted.panopto.com")
+
+    def test_a_half_filled_section_is_rejected_rather_than_ignored(self):
+        for field in ("host", "client_id", "client_secret", "parent_folder_id"):
+            for bad in ("", "   ", None, 7):
+                with self.subTest(field=field, bad=bad):
+                    self._write(self._with_panopto(**{field: bad}))
+                    with self.assertRaises(ConfigError) as caught:
+                        load_config(self.path)
+                    self.assertIn(field, str(caught.exception))
+
+    def test_an_unknown_access_model_is_rejected(self):
+        self._write(self._with_panopto(access_model="whoever"))
+        with self.assertRaises(ConfigError):
+            load_config(self.path)
+
+    def test_per_student_is_accepted(self):
+        self._write(self._with_panopto(access_model="per_student"))
+        self.assertEqual(load_config(self.path).panopto.access_model, ACCESS_MODEL_PER_STUDENT)
+
+    def test_the_section_must_be_an_object(self):
+        data = json.loads(json.dumps(VALID))
+        data["panopto"] = "neco.hosted.panopto.com"
+        self._write(data)
+        with self.assertRaises(ConfigError):
+            load_config(self.path)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -123,11 +123,40 @@ class RecordingConfig:
     fps: int
 
 
+# The two access models in the Notion brief's A/B table: one folder per
+# cohort, or one per student. Which one NECO picks is a policy decision
+# that isn't ours, so config carries the answer instead of the code
+# assuming one -- see ROADMAP.md's 2026-09-17 Panopto entry.
+ACCESS_MODEL_COHORT = "cohort"
+ACCESS_MODEL_PER_STUDENT = "per_student"
+VALID_ACCESS_MODELS = (ACCESS_MODEL_COHORT, ACCESS_MODEL_PER_STUDENT)
+
+
+@dataclass
+class PanoptoConfig:
+    """Where uploaded sessions go, and what may talk to Panopto.
+
+    Credentials, not calibration: unlike the rest of config.json these are
+    hand-entered from what IT issues, not written by settings.py.
+    """
+
+    host: str  # site hostname only, e.g. "neco.hosted.panopto.com"
+    client_id: str
+    client_secret: str
+    parent_folder_id: str
+    access_model: str = ACCESS_MODEL_COHORT
+
+
 @dataclass
 class AppConfig:
     instruments: dict[str, InstrumentConfig]
     third_person: ThirdPersonConfig
     recording: RecordingConfig
+    # None means "no Panopto on this machine" -- the valid, and currently
+    # normal, state. Every dev machine is in it, and so is any clinic PC
+    # until credentials exist, so it must never be an error: the drive
+    # export is still there. viewer.py offers an upload only when this is set.
+    panopto: PanoptoConfig | None = None
 
 
 def achievable_fps(exposure_time_us: float) -> float:
@@ -188,11 +217,13 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
     third_person = _parse_third_person(path, third_person_raw)
 
     recording = _parse_recording(path, raw.get("recording"))
+    panopto = _parse_panopto(path, raw.get("panopto"))
 
     config = AppConfig(
         instruments=instruments,
         third_person=third_person,
         recording=recording,
+        panopto=panopto,
     )
     for message in exposure_fps_warnings(config):
         logger.warning("%s: %s", path, message)
@@ -360,6 +391,58 @@ def _parse_recording(path: Path, entry: object) -> RecordingConfig:
         raise ConfigError(f"{path}: recording.fps must be a positive whole number. {_FIX_HINT}")
 
     return RecordingConfig(fps=int(fps))
+
+
+def _parse_panopto(path: Path, entry: object) -> "PanoptoConfig | None":
+    """Optional section; absent means uploads are off, which is valid.
+
+    Deliberately absent from config.example.json too: the example must stay
+    loadable as copied, and a placeholder credential would fail every
+    machine that has no Panopto site. The shape is:
+
+        "panopto": {
+          "host": "neco.hosted.panopto.com",
+          "client_id": "...", "client_secret": "...",
+          "parent_folder_id": "...",
+          "access_model": "cohort" | "per_student"
+        }
+
+    Present-but-incomplete is an error rather than a fallback to off. A
+    half-filled section means someone was configuring uploads and didn't
+    finish, and silently recording to a machine that won't upload is the
+    black-pane failure in another costume.
+    """
+    if entry is None:
+        return None
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{path}: 'panopto' must be an object. {_FIX_HINT}")
+
+    values: dict[str, str] = {}
+    for field_name in ("host", "client_id", "client_secret", "parent_folder_id"):
+        value = entry.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"{path}: panopto.{field_name} must be a non-empty string. "
+                f"Remove the whole 'panopto' section to disable uploads."
+            )
+        values[field_name] = value.strip()
+
+    # A technician handed a site URL will paste the URL. Taking the
+    # hostname out of it is unambiguous, so do that rather than fail.
+    host = values["host"]
+    host = host.split("://", 1)[-1].split("/", 1)[0]
+    if not host:
+        raise ConfigError(f"{path}: panopto.host has no hostname in it. {_FIX_HINT}")
+    values["host"] = host
+
+    access_model = entry.get("access_model", ACCESS_MODEL_COHORT)
+    if access_model not in VALID_ACCESS_MODELS:
+        raise ConfigError(
+            f"{path}: panopto.access_model must be one of "
+            f"{', '.join(VALID_ACCESS_MODELS)}. {_FIX_HINT}"
+        )
+
+    return PanoptoConfig(access_model=access_model, **values)
 
 
 def _positive_int(path: Path, field_name: str, value: object) -> int:

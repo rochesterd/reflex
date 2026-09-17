@@ -35,44 +35,6 @@ diagnosis-only, per CLAUDE.md's "loud and early".
 
 ---
 
-## 2026-09-13 — Where exported recordings should ultimately go
-
-The buffer itself is built (DECISIONS 2026-09-13): nothing outlives the
-app, and a student keeps what they Export. **For testing that export goes
-to their own flash drive, which is a stopgap, not the answer** — handing a
-student the file discloses their peer's image to them and takes it outside
-any retention, deletion or breach process NECO governs.
-
-**Intended destination: Panopto.** Institutional systems solve the
-governance half — access control, retention, audit, and an owner. Panopto
-looks the closer fit than Canvas: it is built for *multiple simultaneous
-feeds*, which is exactly what a session is, and its assignment folders give
-each student a space only they and instructors see. Canvas would most
-likely mean one composited file, and students would lose the layout picker
-and independent angles.
-
-**Blocking questions for IT, none of them technical for us:**
-
-1. Does NECO have Panopto, and does it cover this use?
-2. Can a kiosk get an API credential, and is a service account acceptable?
-3. What does the assignment-folder permission model actually allow?
-4. What is the storage quota? Budget ~0.16 GB per 15-minute session as
-   measured, not the 750 MB the disk preflight reserves.
-
-A service account is simplest but lands every recording under one identity,
-which brings the identifier question straight back. Per-student login at
-the kiosk attributes correctly and is heavier for an unsupervised student.
-
-**The engineering is the same either way**, and already half-built: export,
-verify, and only then let the buffer go. Keep the destination pluggable — a
-drive and an upload are the same operation with a different target.
-
-**Still not to be built until this settles:** audio (it adds voices to data
-we cannot place correctly) and any identifier feature (a nickname does not
-make a face less identifying).
-
----
-
 ## 2026-09-12 — Use what each camera's stack actually offers (planned, not built)
 
 Replaces the separate "legacy BIO picture registers" and "shadow detail on
@@ -129,3 +91,58 @@ improvement ends that step, and the DECISIONS entry records the numbers
 that killed it. Inheriting the vendor's value is a legitimate outcome for
 the legacy BIO. "We could set it" was never the argument; "the picture is
 better and we can show it" is.
+
+---
+
+## 2026-09-17 — Uploading a session to Panopto (planned, not built)
+
+Replaces the 2026-09-13 "where exported recordings should ultimately go"
+entry: the destination is settled. The Notion brief ("Recording Storage &
+Access Decision Brief") owns the institutional half and is the source for
+anything policy-shaped; this is only what Reflex builds. **No credentials
+yet — all of it is written to be built and tested without them.**
+
+**Shape.** An upload sits where the drive export sits: after record, after
+verification, and the buffer is released only once it succeeds. It is
+*not* `export_session()` pointed elsewhere — Panopto takes both streams as
+one session with an offset manifest, so no composite is rendered on this
+path. `compositor.py` stays for the drive.
+
+**Boundary, the rule drawn around the IDS SDK.** Nothing outside these
+modules may import an HTTP client or know a token exists:
+
+- `panopto_api.py` — OAuth and REST. Knows HTTP, not sessions.
+- `panopto_upload.py` — takes a `Session` and a folder, returns the new
+  Panopto session's URL. Same `progress_cb`/`cancel_cb` signature as
+  `export_session()`, so `viewer.py`'s `_ExportWorker` drives either
+  without learning a second shape.
+- `config.py` gains a `panopto` section (host, client id/secret, parent
+  folder, access model), validated at load like the rest — a missing
+  credential fails before `QApplication` exists.
+
+**Don't invent the API.** The brief verified these endpoints exist; the
+request and manifest formats are *not* verified. Write them from the real
+spec or a captured exchange, and mark anything guessed — the rule that
+governs `vendor/ids_peak_api.txt` applies here too.
+
+**Phase 1 — upload, no identity.** One parent folder, service account,
+every session lands there; builds end to end without the sign-in question
+being answered. Failure is loud and in-session: a warning, a Retry, and
+the session stays unexported so `app.py`'s `_unexported_session()` refuses
+a silent discard on close. No retry queue and nothing persisted past exit
+— the buffer's rules do not change.
+
+**Phase 2 — identity and filing.** Kiosk sign-in, then the student's own
+folder made on first visit with a view-only grant. Gated on whether Canvas
+is in that path at all, and on access model A vs B, which decides whether
+per-student folders exist.
+
+**Testing without a site.** A local double at the `panopto_api.py` seam is
+part of phase 1, not an afterthought — the reason `SyntheticCamera`
+exists. Record a two-stream session with `SyntheticCamera`, upload it to
+the double, assert what was sent. `tools/panopto_probe.py` is then the
+first thing to run when tokens arrive: auth, list folders, create one,
+grant, upload one short session, print what came back.
+
+**Still not to be built:** audio, the email notification, and any
+identifier feature. Unchanged from the entry this replaces.
