@@ -116,34 +116,43 @@ def main() -> int:
         print(f"serial {args.serial}: starting from "
               + (f"config.json ({exposure / 1000:.1f}ms, {gain:.2f}x)" if exposure and gain else "the camera's own values"))
 
-    original: tuple[float, float] | None = None
-    for value in args.values:
-        # gamma is resolved at open (and the host curve with it), so each
-        # gamma step is its own open; gain is a live write on one open.
-        camera = IdsCamera(
-            serial=args.serial, exposure_time_us=exposure, gain=gain, target_fps=30, converge_auto=False,
-            pixel_format=args.pixel_format, gamma=value if args.lever == "gamma" else None,
-        )
-        try:
-            camera.start()
-        except IdsCameraNotFoundError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        try:
-            if original is None:
-                original = (camera.get_exposure_time_us(), camera.get_gain())
+    # One open for the whole sweep. Both levers are live writes -- gain
+    # through its node, gamma through IdsCamera's own _apply_gamma(), which
+    # reaches the camera's Gamma node or re-arms the host curve, whichever
+    # this model has. A reopen per step took ~5s each, and a hand-held
+    # target moved between every frame (the first Keeler sweep was a thumb
+    # in six different poses, one of them motion-blurred).
+    camera = IdsCamera(
+        serial=args.serial, exposure_time_us=exposure, gain=gain, target_fps=30, converge_auto=False,
+        pixel_format=args.pixel_format, gamma=args.values[0] if args.lever == "gamma" else None,
+    )
+    try:
+        camera.start()
+    except IdsCameraNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        original_gain = camera.get_gain()
+        images = []
+        started = time.monotonic()
+        for value in args.values:
             if args.lever == "gain":
                 low, high = camera.gain_range()
                 camera.set_gain(min(high, max(low, value)))
-            image = fresh_frame(camera)
-            print(f"  {args.lever} {value:5.2f}: {describe(image)}")
-            height, width = image.shape[:2]
-            small = cv2.resize(image, (1024, round(height * 1024 / width)), interpolation=cv2.INTER_AREA)
-            cv2.imwrite(str(args.out / f"{args.serial}_{args.lever}_{value:05.2f}.png"), small)
-            if args.lever == "gain":
-                camera.set_gain(original[1])
-        finally:
-            camera.stop()
+            else:
+                camera._gamma = value  # a diagnostic reaches past the wrapper, as the probe tool does
+                camera._apply_gamma()
+            images.append((value, fresh_frame(camera)))
+        print(f"  ({len(images)} steps in {time.monotonic() - started:.1f}s -- hold the scene still for that long)")
+        if args.lever == "gain":
+            camera.set_gain(original_gain)
+    finally:
+        camera.stop()
+    for value, image in images:
+        print(f"  {args.lever} {value:5.2f}: {describe(image)}")
+        height, width = image.shape[:2]
+        small = cv2.resize(image, (1024, round(height * 1024 / width)), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(args.out / f"{args.serial}_{args.lever}_{value:05.2f}.png"), small)
     print(f"frames in {args.out.resolve()}")
     return 0
 

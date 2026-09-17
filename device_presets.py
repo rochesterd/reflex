@@ -168,6 +168,14 @@ PROFILES: tuple[DeviceProfile, ...] = (
         # p99.9 -- measured 2026-09-14. The field rule's numbers are
         # provisional until confirmed against a model eye.
         metering=METERING_FIELD,
+        # Applied by the camera's own Gamma node; Brightness works upward
+        # from here. Swept 2026-09-17 on skin in the lit field, one open,
+        # exposure fixed: by 2.2 the field has gone flat and pale, while
+        # 1.3 barely differs from none. Gentler than the slit lamp's 1.8
+        # because here the lit field *is* the picture -- the curve is for
+        # its dim end, not for the room outside the disc. PROVISIONAL
+        # until seen on a fundus, and for noise at the gain it runs at.
+        gamma=1.5,
         note="Calibrate in Preview: its own auto-exposure runs before the instrument is in use.",
     ),
     DeviceProfile(

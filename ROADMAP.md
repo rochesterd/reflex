@@ -100,14 +100,15 @@ keep the numbers in the DECISIONS entry.
   sweep on a fundus target, check the lit fraction through a real pupil,
   and check noise at the gain it picks. Adjust the numbers or record that
   they held.
-- **Finish the resting tone curves** (DECISIONS 2026-09-17). The slit
-  lamp's is set -- gamma 1.8, 12-bit, digital black 0.025 per gain -- but
-  chosen on a matte-black focus rod: confirm on an eye, for noise as well
-  as brightness. The Keeler's `gamma` is still `None`: sweep it with
-  `tools/measure_picture.py <serial> gamma 1.0 1.4 1.8 2.2 --calibrate`
-  on a fundus view and set it in its profile. No recalibration is needed
-  either way: Auto-Calibrate meters with the curve off. The Keeler's LUT
-  only if one exponent proves too blunt.
+- **Confirm the resting tone curves on real subjects** (DECISIONS
+  2026-09-17). Both are set and both provisional: the slit lamp's (gamma
+  1.8, 12-bit, digital black 0.025 per gain) was chosen on a matte-black
+  focus rod, the Keeler's (1.5) on skin. Check each on an eye / a fundus,
+  at full resolution for noise as well as brightness;
+  `tools/measure_picture.py <serial> gamma ... --calibrate` re-sweeps one
+  in seconds. No recalibration is needed after a change: Auto-Calibrate
+  meters with the curve off. The Keeler's LUT only if one exponent proves
+  too blunt.
 - **Hands camera exposure.** Today the two-second warmup's result is frozen,
   so every session starts from whatever the room looked like. Have
   `settings.py` record the converged value at calibration time and

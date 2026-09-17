@@ -335,7 +335,11 @@ class IdsCamera(BaseCamera):
                 if self._target_fps:
                     exposure_max = min(exposure_max, exposure_budget_us(self._target_fps))
                 wanted = self._exposure_time_us
-                if wanted > exposure_max:
+                # A hair of tolerance: the camera quantises exposure, and a
+                # calibration *at* the budget reads back as 30002.7us -- which
+                # then warned "recalibrate with more light" at every start
+                # about a value this app chose itself.
+                if wanted > exposure_max * 1.001:
                     logger.warning(
                         "%s: config exposure %.1fms exceeds the %.1ffps budget; using %.1fms. "
                         "Recalibrate with more light at the instrument.",

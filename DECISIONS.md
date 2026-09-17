@@ -5432,3 +5432,41 @@ Known leftover: a slight purple cast in the lifted floor, because the floor
 differs per channel and the subtraction is one master value.
 
 ---
+## 2026-09-17 — The Keeler rests at gamma 1.5
+
+**Adopted** `gamma=1.5` on the Keeler's profile: the camera's own Gamma
+node, written at every open; Brightness works upward from it to 2.4.
+
+Swept on skin in the lit field at a fixed, freshly calibrated 30ms / 8.9x,
+all six steps on one open in 3.0s:
+
+| gamma | p50 | p90 | p95 | clipped | by eye |
+|---|---|---|---|---|---|
+| 1.0 | 4 | 123 | 194 | 5.7% | richest skin; all outside the disc black |
+| 1.3 | 10 | 145 | 205 | 5.7% | barely differs |
+| 1.6 | 19 | 160 | 212 | 6.1% | dim end and surround come up; creases still read |
+| 2.2 | 38 | 178 | 218 | 6.0% | field gone flat and pale |
+
+The curve adds no clipping at any setting. **Gentler than the slit lamp's
+1.8, for a reason:** there the curve bridges a 20:1 gap between beam and
+everything else; here the lit field *is* the picture and outside the disc
+is only the room, so the curve is for the field's dim end and must not
+cost the field its contrast.
+
+**The first attempt measured nothing**, and the tool was why: it reopened
+the camera per step, ~5s each, and a hand-held target was in six poses
+(one motion-blurred) -- p95 went 199, 160, 227 as gamma *rose*, which a
+curve cannot do. `measure_picture.py` now sweeps on one open with live
+writes. A non-monotonic sweep means the scene moved, not the camera.
+
+**Also fixed:** `_open()` warned "exceeds the budget... recalibrate with
+more light" about 30002.7us, the camera's own rounding of a 30ms
+calibration -- on every start of any BIO calibrated at the budget, which
+is the normal case. It now allows 0.1%.
+
+**Verified on the camera:** opens at 1.5; Brightness 0.5 -> 1.95, 1.0 ->
+2.4, 0.0 -> 1.5; Auto-Calibrate meters at 1.0 and restores 1.5.
+**Provisional:** not yet seen on a fundus, nor judged for noise at full
+resolution at the gain it runs at.
+
+---
