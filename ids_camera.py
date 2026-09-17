@@ -87,6 +87,7 @@ from ids_peak_ipl import ids_peak_ipl
 from camera import BaseCamera
 from device_presets import (
     black_level_for_model,
+    digital_black_per_gain_for_model,
     gamma_for_model,
     metering_for_model,
     pixel_format_for_model,
@@ -563,6 +564,10 @@ class IdsCamera(BaseCamera):
 
     def set_gain(self, value: float) -> None:
         self._node_map.FindNode("Gain").SetValue(value)
+        # The black floor scales with gain, and so must what the host
+        # curve subtracts -- see _set_host_gamma().
+        if self._host_corrector is not None:
+            self._set_host_gamma(self._resting_gamma())
 
     def gain_range(self) -> tuple[float, float]:
         node = self._node_map.FindNode("Gain")
@@ -640,8 +645,22 @@ class IdsCamera(BaseCamera):
         corrector.SetGammaCorrectionValue(
             min(float(corrector.GammaCorrectionMax()), max(float(corrector.GammaCorrectionMin()), gamma))
         )
+        # Subtract the sensor's floor first, or the curve lifts empty space
+        # into haze along with the picture. It scales with gain, so this is
+        # re-armed from set_gain().
+        per_gain = digital_black_per_gain_for_model(self._model_name)
+        if per_gain:
+            black = per_gain * self.get_gain()
+            corrector.SetDigitalBlack(
+                min(float(corrector.DigitalBlackMax()), max(float(corrector.DigitalBlackMin()), black))
+            )
+        # A new corrector swapped in whole, never one mutated in place:
+        # _grab() reads this reference from the capture thread.
         self._host_corrector = corrector
-        logger.info("%s: host tone curve, gamma %.2f", self.label, corrector.GammaCorrectionValue())
+        logger.info(
+            "%s: host tone curve, gamma %.2f, digital black %.3f",
+            self.label, corrector.GammaCorrectionValue(), corrector.DigitalBlack(),
+        )
 
     def _apply_light(self, amount: float) -> None:
         """No tone curve on this camera: spend light instead, exposure first."""
@@ -902,24 +921,43 @@ class IdsCamera(BaseCamera):
         fps = target_fps if target_fps is not None else self._target_fps
         max_exposure_us = exposure_budget_us(fps) if fps else None
 
-        for _ in range(max_iterations):
-            measured = metering_brightness(self._wait_for_fresh_frame(), metering)
-            if is_converged(measured, target, tolerance):
-                return True
+        # Meter linear light: every target was chosen on an uncurved frame,
+        # and a calibration that does not depend on the curve stays valid
+        # when the curve is retuned. The picture flickers for the second
+        # this takes; the curve comes back whatever happens.
+        self._set_tone_curve_active(False)
+        try:
+            for _ in range(max_iterations):
+                measured = metering_brightness(self._wait_for_fresh_frame(), metering)
+                if is_converged(measured, target, tolerance):
+                    return True
 
-            new_exposure, new_gain = next_exposure_gain(
-                measured,
-                self.get_exposure_time_us(),
-                exposure_range,
-                self.get_gain(),
-                gain_range,
-                target=target,
-                max_exposure_us=max_exposure_us,
-            )
-            self.set_exposure_time_us(new_exposure)
-            self.set_gain(new_gain)
+                new_exposure, new_gain = next_exposure_gain(
+                    measured,
+                    self.get_exposure_time_us(),
+                    exposure_range,
+                    self.get_gain(),
+                    gain_range,
+                    target=target,
+                    max_exposure_us=max_exposure_us,
+                )
+                self.set_exposure_time_us(new_exposure)
+                self.set_gain(new_gain)
 
-        return False
+            return False
+        finally:
+            self._set_tone_curve_active(True)
+
+    def _set_tone_curve_active(self, active: bool) -> None:
+        """Switch this camera's tone curve off (a straight line) or back
+        to where brightness and the model's resting value put it."""
+        if active:
+            self._apply_gamma()
+        elif self._has_gamma():
+            node = self._node_map.FindNode("Gamma")
+            node.SetValue(min(float(node.Maximum()), max(float(node.Minimum()), 1.0)))
+        else:
+            self._host_corrector = None
 
     def _wait_for_fresh_frame(self) -> np.ndarray:
         """A frame already queued when ExposureTime/Gain just changed was

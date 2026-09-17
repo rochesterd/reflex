@@ -82,12 +82,39 @@ def main() -> int:
     parser.add_argument("values", type=float, nargs="+")
     parser.add_argument("--pixel-format", help="e.g. BayerRG12; default is the profile's, else the camera's own")
     parser.add_argument("--out", type=Path, default=Path("picture_sweep"))
+    parser.add_argument(
+        "--calibrate", action="store_true",
+        help="run Auto-Calibrate once against this scene, with no curve, and hold its result for every step",
+    )
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
     exposure, gain = saved_calibration(args.serial)
-    print(f"serial {args.serial}: starting from "
-          + (f"config.json ({exposure / 1000:.1f}ms, {gain:.2f}x)" if exposure and gain else "the camera's own values"))
+    if args.calibrate:
+        # With no curve, deliberately: a curve changes what the metering
+        # sees, and the sweep must vary one thing.
+        # target_fps=None, as Settings' Preview opens it: on the uEye
+        # transport a 30fps cap lengthens ExposureTime's maximum past what
+        # the next open (which sets exposure before the cap) can accept, so
+        # a capped calibration reached 30.0ms and every step then clamped
+        # it to 26.3ms. auto_calibrate() still gets the 30fps budget.
+        camera = IdsCamera(serial=args.serial, target_fps=None, converge_auto=False,
+                           pixel_format=args.pixel_format, gamma=1.0)
+        try:
+            camera.start()
+        except IdsCameraNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        try:
+            converged = camera.auto_calibrate(target_fps=30)
+            exposure, gain = camera.get_exposure_time_us(), camera.get_gain()
+        finally:
+            camera.stop()
+        print(f"serial {args.serial}: calibrated ({'converged' if converged else 'NOT converged'}) "
+              f"to {exposure / 1000:.1f}ms, {gain:.2f}x")
+    else:
+        print(f"serial {args.serial}: starting from "
+              + (f"config.json ({exposure / 1000:.1f}ms, {gain:.2f}x)" if exposure and gain else "the camera's own values"))
 
     original: tuple[float, float] | None = None
     for value in args.values:

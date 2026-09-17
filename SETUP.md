@@ -143,8 +143,8 @@ If a camera shows up in Section 4 but frames arrive slower than expected
 once you're actually capturing, **suspect bandwidth or exposure before the
 driver.** USB3 Vision degrades by silently dropping frames rather than
 raising an error. Only one instrument camera streams at a time, so the
-real load is one instrument plus the third-person webcam — about 94 MB/s
-for the Keeler at 30fps — against a realistic 350-400 MB/s per USB 3.0
+real load is one instrument plus the third-person webcam — at most about
+115 MB/s, the slit lamp at 12-bit — against a realistic 350-400 MB/s per USB 3.0
 host controller, and that combination has measured clean (see
 `SUPPORTED_HARDWARE.md`'s bandwidth table). A low frame rate with no
 errors usually means something else shares the controller, or an exposure

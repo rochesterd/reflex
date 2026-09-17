@@ -35,12 +35,12 @@ can do the same work on the camera for free.
 ## What each option costs
 
 At 30 fps, computed from the measured resolutions. Today's configuration
-is the first row of each camera.
+is the first row of each camera unless a row says otherwise.
 
 | Camera | Format | Bandwidth | Note |
 |---|---|---|---|
-| Slit lamp 1600x1200 | Bayer8 | 57.6 MB/s | today |
-| | Bayer10/12 | 115.2 MB/s | no packed format on this camera, so 12 bits cost 16 |
+| Slit lamp 1600x1200 | Bayer8 | 57.6 MB/s | until 2026-09-17 |
+| | Bayer10/12 | 115.2 MB/s | **today** (Bayer12, for the host tone curve); no packed format on this camera, so 12 bits cost 16 |
 | | BGR8 | 172.8 MB/s | camera-side debayer; 3x the data to save host CPU |
 | Keeler 2048x1536 | Bayer8 | 94.4 MB/s | today |
 | | Bayer12p | 141.6 MB/s | packed, so 12 bits cost 12 |
@@ -54,7 +54,8 @@ is the first row of each camera.
 ## Ceilings
 
 - **USB 3.0 bus.** One instrument streams at a time, so the worst case is
-  one instrument plus the hands camera: **113 MB/s of a measured 350–400**.
+  one instrument plus the hands camera: **134 MB/s of a measured 350–400**
+  (the slit lamp at 12-bit; the Keeler at 8-bit is 113).
   Even unpacked 12-bit on the Keeler (207) is about half capacity.
   Bandwidth is not what limits picture quality here.
 - **USB 2.0, hands camera.** The tightest bus: 18 MB/s of a practical

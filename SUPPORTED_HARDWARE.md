@@ -20,7 +20,7 @@ for the project this supports.
 streams at a time (`select_instrument()` — see CLAUDE.md's Architecture
 section), so the worst case is one instrument plus the third-person
 webcam: at 30fps roughly 94 MB/s for the Keeler (2048x1536 Bayer8) or
-58 MB/s for the slit lamp (1600x1200), plus a 640x480 webcam — well inside
+115 MB/s for the slit lamp (1600x1200 Bayer12), plus a 640x480 webcam — well inside
 the 350-400 MB/s a single USB 3.0 controller delivers. Measured with both
 streaming, counting device-side `Frame.index` gaps:
 

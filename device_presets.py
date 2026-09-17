@@ -90,6 +90,12 @@ class DeviceProfile:
     # levels to stretch -- measured 77 steps against 40 -- and are thrown
     # away by the 8-bit conversion otherwise. See DECISIONS.md 2026-09-17.
     pixel_format: str | None = None
+    # For a host-curved camera: how much of full scale to subtract before
+    # the curve, per unit of gain. A sensor's black floor is not zero, and
+    # a curve lifts it like anything else -- empty space turns to haze.
+    # Per gain because the floor scales with it. Set a little *under* the
+    # measured floor: haze is recoverable, crushed blacks are not.
+    digital_black_per_gain: float | None = None
     # One line for the technician, shown under the profile in settings.py.
     note: str = ""
 
@@ -130,6 +136,19 @@ PROFILES: tuple[DeviceProfile, ...] = (
         # beam unchanged. Gain only ever helps (the offset scales with it),
         # so a value chosen at gain 1.0, the worst case, is safe above it.
         black_level=110.0,
+        # Measured 2026-09-17 on a backlit focus rod: to this sensor the
+        # beam is 20x brighter than the backlit surface beside it, so with
+        # the beam exposed correctly the rest sits ~10 levels above black.
+        # 1.8 makes the rod's surface readable with the beam still
+        # unclipped (p99.9 208 -> 226); at 2.2 the beam's own texture
+        # starts to flatten, and that texture is the clinical content.
+        # PROVISIONAL until seen on an eye -- a matte-black rod is the
+        # hardest case, not the typical one.
+        gamma=1.8,
+        pixel_format="BayerRG12",
+        # The floor measures 7.0 of 255 at gain 1.0 (0.0275) and scales
+        # with gain. 0.030 already crushed 1% of the frame; 0.025 none.
+        digital_black_per_gain=0.025,
         note="No auto-exposure of its own: calibrate it in Preview before first use.",
     ),
     DeviceProfile(
@@ -213,6 +232,12 @@ def gamma_for_model(model_name: str | None) -> float | None:
     """The tone curve this model rests at, or None for a straight line."""
     profile = profile_for_model(model_name)
     return profile.gamma if profile is not None else None
+
+
+def digital_black_per_gain_for_model(model_name: str | None) -> float | None:
+    """Floor to subtract before a host curve, per unit of gain, or None."""
+    profile = profile_for_model(model_name)
+    return profile.digital_black_per_gain if profile is not None else None
 
 
 def pixel_format_for_model(model_name: str | None) -> str | None:

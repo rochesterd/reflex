@@ -5387,3 +5387,48 @@ spends light rather than curving; whether it should is a separate
 question, since light is real signal and a curve amplifies shadow noise.
 
 ---
+## 2026-09-17 — The slit lamp's curve: gamma 1.8, and the floor taken off first
+
+"The backlight is medium and the slit medium-high, but the background is
+almost black." Measured rather than argued: across four exposures the
+backlit focus rod returned a steady 1.3 levels per thousand units of light
+(exposure x gain) and the unsaturated beam 25.7. **To the sensor the beam
+is 20x brighter than the surface beside it**, 4.3 stops. An eye compresses
+that to "medium versus medium-high"; a linear sensor exposed for the beam
+puts the rod 10 levels above black. Nothing was lost in the optical path.
+
+**Adopted for the slit lamp:** `gamma=1.8`, `pixel_format="BayerRG12"`,
+`digital_black_per_gain=0.025`. Swept on that scene at a fixed, freshly
+calibrated 3.8ms / 1.0x:
+
+| gamma | rod (p90) | beam (p99.9) | clipped | by eye |
+|---|---|---|---|---|
+| 1.0 | 23 | 208 | 0.04% | rod invisible |
+| 1.8 | 66 | 228 | 0.05% | rod's surface and edge marks readable |
+| 2.2 | 84 | 232 | 0.05% | brighter, but the beam's texture starts to flatten |
+
+1.8, not more, because structure *inside* the beam is the clinical content.
+
+**A curve alone turns empty space to haze**, which the first sweep -- run
+before the backlight was lighting anything -- showed and nothing else: the
+sensor's floor is 7 of 255 at gain 1.0, not zero, and gets lifted like
+everything else (p50 9 -> 57 at 2.2, purple-grey). `SetDigitalBlack`
+subtracts it first. The edge is sharp: 0.030 already crushed 1% of the
+frame, 0.040 crushed 94% on the earlier scene; 0.025 none. The floor scales
+with gain, so the value is per unit of gain and re-armed from `set_gain()`,
+and it sits deliberately *under* the floor: haze is recoverable, crushed
+blacks are what 2026-09-13's black-level fix existed to remove.
+
+**Auto-Calibrate meters with the curve off** and restores it. Its targets
+were chosen on linear light, and a calibration that does not depend on the
+curve survives the curve being retuned. Verified: 3.80ms / 1.00x, the
+linear result exactly.
+
+**Verified on the camera, opened as the app opens it:** BayerRG12, curve
+armed, 30.19fps over 10s with 0 dropped, 57% of one core (45% uncurved
+8-bit). **Provisional:** a matte-black rod is the hardest case, not the
+typical one -- skin and sclera return several times more of the backlight.
+Known leftover: a slight purple cast in the lifted floor, because the floor
+differs per channel and the subtraction is one master value.
+
+---

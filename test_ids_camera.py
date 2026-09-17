@@ -90,6 +90,23 @@ class ToBgr8Test(unittest.TestCase):
 
         self.assertGreater(len(np.unique(curved_first)), 1.5 * len(np.unique(curved_after)))
 
+    def test_digital_black_keeps_empty_space_black_while_the_picture_lifts(self):
+        """A sensor's floor is not zero, and a curve alone lifts it into
+        haze. Measured on the slit lamp: floor 7 of 255 at gain 1.0."""
+        floor, surface = 112, 272  # 12-bit: the floor, and a backlit surface 10 levels above it
+        scene = np.full((H, W), floor, dtype=np.uint16)
+        scene[:, W // 2 :] = surface
+
+        hazy = _to_bgr8(_bayer12(scene), _corrector(1.8))
+        corrector = _corrector(1.8)
+        corrector.SetDigitalBlack(0.025)
+        clean = _to_bgr8(_bayer12(scene), corrector)
+
+        empty, lit = (slice(None), slice(8, W // 2 - 8), 1), (slice(None), slice(W // 2 + 8, -8), 1)
+        self.assertGreater(float(hazy[empty].mean()), 25)  # the floor, lifted into haze
+        self.assertLess(float(clean[empty].mean()), 12)  # ...and put back
+        self.assertGreater(float(clean[lit].mean()), 3 * float(clean[empty].mean()) + 10)  # picture survives
+
     def test_the_result_outlives_every_intermediate_image(self):
         """get_numpy_3D() is a view that does not keep its Image alive;
         reading it late is an access violation, not an exception."""
