@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from app_icon import ICON_APP, icon_path
+from audio_capture import AudioCapture, AudioUnavailable
 from camera import BaseCamera
 from compositor import side_by_side
 from config import (
@@ -51,12 +52,13 @@ from kiosk import KioskController, PreflightStatus, State
 from neco_reflex_theme import BURGUNDY_BGR
 from qt_image import bgr_to_pixmap
 from reflex_mark import ReflexMark
-from session_format import MANIFEST_NAME
+from session_format import INSTRUMENT_STREAM, MANIFEST_NAME, THIRD_PERSON_STREAM
 import reflex_style
 from session_buffer import buffer_root, clear_buffer
 from synthetic_camera import SyntheticCamera
 from uvc_camera import UvcCamera
 from viewer import open_session
+from virtual_camera import PyVirtualCamBackend, VirtualCameraSink, VirtualCameraUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +160,28 @@ class KioskWindow(QMainWindow):
         instrument_labels: dict[str, str] | None = None,
         fps: int = DEFAULT_RECORDING_FPS,
         output_root: str | Path = "sessions",
+        panopto=None,
+        streaming=None,
+        virtual_camera_backend_factory=PyVirtualCamBackend,
+        audio: AudioCapture | None = None,
     ):
         super().__init__()
         self.setWindowTitle("Reflex")
+        # The microphone, started by main() and running for the app's
+        # lifetime like the third-person camera. None is a silent kiosk.
+        self._audio = audio
+        # config.StreamingConfig with enabled=True puts the kiosk in stream
+        # mode: no Start/Stop, no buffer, no viewer -- the composed feed
+        # goes to a virtual camera and Panopto Capture records it. The
+        # backend factory is injectable so tests run without the driver.
+        self._streaming = streaming if (streaming is not None and streaming.enabled) else None
+        self._sink: VirtualCameraSink | None = None
+        self._sink_error: str | None = None
+        self._virtual_camera_backend_factory = virtual_camera_backend_factory
+        # config.PanoptoConfig when this machine uploads, else None. Held
+        # only to hand to the viewer; the kiosk itself never talks to
+        # Panopto.
+        self._panopto = panopto
 
         self.third_person_camera = third_person_camera
         self.instruments = instruments
@@ -173,6 +194,7 @@ class KioskWindow(QMainWindow):
             third_person_label=THIRD_PERSON_LABEL,
             fps=fps,
             output_root=output_root,
+            audio=audio,
         )
         self._camera_start_errors: dict[str, str] = {}
         # The instrument the student last picked -- distinct from
@@ -335,6 +357,8 @@ class KioskWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._try_start_cameras()
+        if self._streaming is not None:
+            self._start_streaming()
 
         self.preview_timer = QTimer(self)
         self.preview_timer.timeout.connect(self._update_preview)
@@ -504,6 +528,7 @@ class KioskWindow(QMainWindow):
                 parent=self,
                 on_export=self._on_exported,
                 confirm_close=confirm_close,
+                panopto=self._panopto,
             )
         )
         self._sync_ui()
@@ -534,8 +559,9 @@ class KioskWindow(QMainWindow):
         box.exec()
         return box.clickedButton() is discard
 
-    def _on_exported(self, _out_path: Path) -> None:
-        """The student saved this session somewhere that outlives the app."""
+    def _on_exported(self, _destination: Path | str) -> None:
+        """The student saved this session somewhere that outlives the app --
+        a drive path, or a Panopto URL."""
         if self.controller.last_session_dir is not None:
             self._exported.add(Path(self.controller.last_session_dir))
 
@@ -565,6 +591,61 @@ class KioskWindow(QMainWindow):
         canvas = side_by_side(instrument_image, frame_tp.image, out_size=PREVIEW_CANVAS_SIZE)
         self.video_label.setPixmap(bgr_to_pixmap(canvas))
 
+    # --- Stream mode ----------------------------------------------------
+
+    def _start_streaming(self) -> None:
+        """Open the virtual camera. Failing is loud and stays on screen: a
+        kiosk configured to stream that isn't is the black pane again, and
+        the technician needs the reason, not a silently-recording fallback."""
+        assert self._streaming is not None
+        self._sink = VirtualCameraSink(
+            lambda: (
+                self.instruments[self.controller.selected_instrument]
+                if self.controller.selected_instrument is not None
+                else None
+            ),
+            self.third_person_camera,
+            self._virtual_camera_backend_factory(),
+            layout=self._streaming.layout,
+            size=self._streaming.size,
+            fps=self._streaming.fps,
+        )
+        try:
+            self._sink.start()
+        except VirtualCameraUnavailable as exc:
+            logger.error("streaming unavailable: %s", exc)
+            self._sink = None
+            self._sink_error = str(exc)
+
+    def _stream_faults(self, preflight: PreflightStatus | None) -> dict[str, str]:
+        """What the virtual feed should slate out, from the same preflight
+        that gates Start in record mode -- so the picture and the status
+        line never disagree about which camera is the problem."""
+        faults: dict[str, str] = {}
+        if preflight is None:
+            return faults
+        for role in preflight.frozen_cameras:
+            faults[role] = f"{self._display_names.get(role, role)}: picture frozen"
+        if self.controller.selected_instrument is not None:
+            instrument = self.instruments[self.controller.selected_instrument]
+            if instrument.get_latest() is None and INSTRUMENT_STREAM not in faults:
+                faults[INSTRUMENT_STREAM] = "Waiting for the instrument camera"
+        if self.third_person_camera.get_latest() is None and THIRD_PERSON_STREAM not in faults:
+            faults[THIRD_PERSON_STREAM] = "Waiting for the third-person camera"
+        return faults
+
+    def _streaming_status(self, preflight: PreflightStatus | None) -> str:
+        if self._sink_error is not None:
+            return f"Streaming is not available: {self._sink_error}"
+        if self._desired_instrument is None:
+            return "Select an instrument. The feed shows a red panel until you do."
+        faults = self._stream_faults(preflight)
+        if faults:
+            # The feed is already showing the slate; say the same thing here.
+            return "Not ready - the feed is showing a red panel: " + "; ".join(faults.values())
+        device = self._sink.device_name if self._sink is not None else "the virtual camera"
+        return f'Live. In Panopto Capture, choose the camera "{device}" and press Record there.'
+
     def _poll_tick(self) -> None:
         preflight = None
         if self.controller.state == State.RECORDING:
@@ -582,7 +663,11 @@ class KioskWindow(QMainWindow):
                 )
         else:
             preflight = self.controller.poll_preflight()
+            if self._sink is not None:
+                self._sink.set_faults(self._stream_faults(preflight))
         self._sync_ui(preflight)
+        if self._streaming is not None:
+            return  # nothing is recorded here, so there is never a session to review
         # Covers the stops the student didn't press: the session time limit,
         # and a mid-recording failure that still finalized a session.
         if self.controller.state != State.RECORDING:
@@ -612,11 +697,16 @@ class KioskWindow(QMainWindow):
                 self.brightness_slider.blockSignals(False)
             self.brightness_value_label.setText(self._brightness_text(self.controller.brightness))
 
+        self.start_button.setVisible(self._streaming is None)
+        self.stop_button.setVisible(self._streaming is None)
         self.start_button.setEnabled(state == State.READY)
         self.stop_button.setEnabled(state == State.RECORDING)
         for key, button in self._instrument_buttons.items():
             button.setEnabled(state != State.RECORDING)
             button.setChecked(key == self._desired_instrument)
+        if self._streaming is not None:
+            self.status_label.setText(self._streaming_status(preflight))
+            return
         if state == State.RECORDING:
             self.status_label.setText(self._recording_status())
         elif state == State.READY:
@@ -657,6 +747,12 @@ class KioskWindow(QMainWindow):
             return (
                 f"{names}: the picture is frozen - the camera is on but not seeing "
                 "anything. Check that it isn't covered, switched off, or blocked."
+            )
+
+        if self.controller.microphone_waiting and self.third_person_camera.get_latest() is not None:
+            return (
+                "Waiting for the microphone. Check it is plugged in and not disabled in "
+                "Windows sound settings."
             )
 
         missing = []
@@ -778,16 +874,20 @@ class KioskWindow(QMainWindow):
             except Exception:
                 logger.exception("stop_recording() failed during confirmed close")
 
-        unexported = self._unexported_session()
+        unexported = self._unexported_session() if self._streaming is None else None
         if unexported is not None and not self._confirm_discard_unexported():
             logger.info("close declined: %s has not been exported", unexported)
             event.ignore()
             return
 
+        if self._sink is not None:
+            self._sink.stop()
         self.preview_timer.stop()
         self.poll_timer.stop()
         self.camera_retry_timer.stop()
         self.third_person_camera.stop()
+        if self._audio is not None:
+            self._audio.stop()
         if self.controller.selected_instrument is not None:
             self.instruments[self.controller.selected_instrument].stop()
         super().closeEvent(event)
@@ -953,6 +1053,25 @@ def main() -> int:
     third_person = _make_third_person_camera(
         cfg.third_person.vid_pid, third_person_synthetic, "third-person", target_fps=cfg.recording.fps
     )
+    audio: AudioCapture | None = None
+    if cfg.audio is not None and not cfg.streaming.enabled:
+        audio = AudioCapture(
+            device=cfg.audio.device, samplerate=cfg.audio.samplerate, channels=cfg.audio.channels
+        )
+        try:
+            audio.start()
+        except AudioUnavailable as exc:
+            logger.error(str(exc))
+            QMessageBox.critical(
+                None,
+                "Reflex - Microphone not available",
+                f"{exc}\n\nRecording sound is configured for this machine, but the microphone "
+                f"could not be opened. Fix the microphone, or turn sound off in Settings.",
+            )
+            third_person.stop()
+            for camera in instruments.values():
+                camera.stop()
+            return 1
     instrument_labels = {key: inst.label for key, inst in cfg.instruments.items()}
     # Anything still here belongs to a session that crashed or was killed
     # -- clear it before recording rather than after, so a machine that is
@@ -966,6 +1085,9 @@ def main() -> int:
         instrument_labels=instrument_labels,
         fps=cfg.recording.fps,
         output_root=output_root,
+        panopto=cfg.panopto,
+        streaming=cfg.streaming,
+        audio=audio,
     )
     window.resize(*PREVIEW_CANVAS_SIZE)
     window.show()

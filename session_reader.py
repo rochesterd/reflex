@@ -25,6 +25,7 @@ import av
 import numpy as np
 
 from session_format import (
+    AUDIO_STREAM,
     INSTRUMENT_STREAM,
     MANIFEST_NAME,
     SESSION_FORMAT_VERSION,
@@ -50,6 +51,11 @@ class StreamInfo:
     frame_count: int
     dropped_frames: int
     verified: bool
+    # "video" or "audio". Audio streams have no width/height/frame_count
+    # worth reading; they carry samplerate and channels instead.
+    kind: str = "video"
+    samplerate: int = 0
+    channels: int = 0
     # Per-stream inter-camera latency correction, subtracted from this
     # stream's PTS at alignment time (DECISIONS.md 2026-08-11). Always 0.0
     # until the measurement tooling exists; the plumbing is here so adding
@@ -80,6 +86,17 @@ class Session:
     @property
     def third_person(self) -> StreamInfo | None:
         return self.streams.get(THIRD_PERSON_STREAM)
+
+    @property
+    def audio(self) -> StreamInfo | None:
+        """The microphone track, or None for a silent session -- which is
+        every session recorded before audio existed, and any recorded on a
+        machine with no microphone configured."""
+        return self.streams.get(AUDIO_STREAM)
+
+    @property
+    def video_streams(self) -> dict[str, StreamInfo]:
+        return {role: info for role, info in self.streams.items() if info.kind == "video"}
 
     @classmethod
     def load(cls, session_dir: Path | str) -> "Session":
@@ -136,6 +153,9 @@ class Session:
                 dropped_frames=int(entry.get("dropped_frames", 0)),
                 verified=bool(entry.get("verified", False)),
                 offset_s=float(entry.get("offset_s", 0.0)),
+                kind=str(entry.get("kind", "video")),
+                samplerate=int(entry.get("samplerate", 0)),
+                channels=int(entry.get("channels", 0)),
             )
 
         if not streams:
@@ -250,7 +270,7 @@ class SessionPlayer:
         self.session = session
         self._cursors: dict[str, _StreamCursor] = {}
         try:
-            for role, info in session.streams.items():
+            for role, info in session.video_streams.items():
                 self._cursors[role] = _StreamCursor(info)
         except Exception:
             self.close()  # don't leak the containers already opened

@@ -92,6 +92,14 @@ Source: "dist\settings\*"; DestDir: "{app}\settings"; Flags: ignoreversion recur
 Source: "net2860_winusb\reflex_net2860.inf"; DestDir: "{app}\driver"; Flags: ignoreversion
 Source: "net2860_winusb\reflex_net2860.cat"; DestDir: "{app}\driver"; Flags: ignoreversion
 Source: "net2860_winusb\reflex_net2860.cer"; DestDir: "{app}\driver"; Flags: ignoreversion
+; The virtual camera for stream mode (DECISIONS.md 2026-09-18): Unity
+; Capture's DirectShow filter, MIT-licensed, fetched into vendor\ per
+; PACKAGING.md 2c. `regserver` runs DllRegisterServer at install and the
+; matching unregister at uninstall, so a browser sees "Unity Video Capture"
+; as a camera with no separate driver step. Record-mode kiosks carry it
+; unused; it is 150 KB and registers nothing that runs on its own.
+Source: "..\vendor\unitycapture\UnityCaptureFilter64.dll"; DestDir: "{app}\virtualcam"; Flags: ignoreversion regserver
+Source: "..\vendor\unitycapture\NOTICE.txt"; DestDir: "{app}\virtualcam"; Flags: ignoreversion
 ; The logon sweep of the recording buffer. Installed rather than run once:
 ; the scheduled task below invokes it at every logon, which is the only
 ; thing that clears a buffer left by a crash -- see the script's own header

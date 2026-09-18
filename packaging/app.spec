@@ -28,7 +28,11 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('../assets/reflex.ico', 'assets')],
-    hiddenimports=[],
+    hiddenimports=[
+        # Imported lazily by feature (stream mode, microphone, Panopto
+        # upload), so the static scan can miss them -- name them.
+        "pyvirtualcam", "sounddevice", "boto3",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

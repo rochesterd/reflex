@@ -1,74 +1,104 @@
 """Tests for panopto_api against an in-memory Panopto, plus the double
 itself, which test_panopto_upload.py imports.
 
+The double plays both halves: the API (folder read, session upload) and
+the identity provider. For sign-in it stands in for the browser too --
+given the authorize URL it "logs the student in" by hitting the app's own
+loopback redirect, so the whole PKCE flow runs for real on 127.0.0.1 with
+no site, no credentials and no browser.
+
 **What these tests do and don't prove.** The double answers the same
-provisional paths panopto_api.py sends, so it cannot tell us those paths
-are right -- both sides hold the same guess, and only a real site settles
-it (PANOPTO_PLAN.md's "Assumptions to verify"). What it does prove is the
+paths panopto_api.py sends, so it cannot tell us those paths are right --
+only a real site settles that (DECISIONS.md 2026-09-18). What it proves is the
 client's own behaviour, which is where the bugs that would cost a student
-a recording live: token caching, refreshing exactly once on a 401,
-exact-name matching so a recording can't be filed in a classmate's folder,
-and turning an error status into something a kiosk can say out loud.
+a recording or a classmate their privacy live: PKCE and state actually
+checked, a token that lives only in memory and dies on sign-out, a 401
+that demands a fresh sign-in rather than a silent retry.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import threading
 import unittest
 import urllib.parse
+import urllib.request
 
 from panopto_api import (
     API_ROOT,
-    ROLE_VIEWER,
+    UPLOAD_API_ROOT,
+    UPLOAD_STATE_COMPLETE,
+    UPLOAD_STATE_PROCESSED,
     HttpResponse,
-    PanoptoAuth,
+    LoginCancelled,
     PanoptoAuthError,
     PanoptoClient,
     PanoptoError,
-    PanoptoNotVerified,
     UploadTarget,
+    UserLogin,
 )
 
 HOST = "neco.example.panopto.com"
 CLIENT_ID = "reflex-kiosk"
 CLIENT_SECRET = "s3cret"
 
+# One port per test process, well away from the app's default, so a
+# developer running the app and the tests side by side doesn't collide.
+TEST_REDIRECT_PORT = 48999
+
 
 class FakePanoptoSite:
-    """An in-memory Panopto behind the Transport seam.
+    """An in-memory Panopto behind the Transport seam, and the browser
+    that signs a student in.
 
-    Holds folders, users and folder permissions, and records every request
-    so a test can assert on what was sent rather than only on what came
-    back. `fail_next` and `expire_token` force the failure paths that are
-    otherwise unreachable without unplugging a real network.
+    Holds folders and uploads, and records every request so a test can
+    assert on what was sent. `refuse_login` and `fail_next` force the
+    failure paths that are otherwise unreachable without a real outage.
     """
 
-    def __init__(self, client_id: str = CLIENT_ID, client_secret: str = CLIENT_SECRET):
+    def __init__(self, client_id: str = CLIENT_ID, client_secret: str | None = None):
         self._client_id = client_id
         self._client_secret = client_secret
         self.folders: dict[str, dict] = {}
-        self.users: dict[str, dict] = {}
-        self.access: dict[str, dict[str, str]] = {}
         self.uploads: dict[str, dict] = {}
         self.requests: list[tuple[str, str]] = []
-        self.token_requests = 0
+        self.authorize_urls: list[str] = []
         self.issued_token = "token-1"
         self.token_lifetime = 3600
+        self.token_requests = 0
         self.fail_next: tuple[int, str] | None = None
+        self.refuse_login = False
         self.expire_token = False
+        self._pending: dict[str, str] = {}  # code -> expected code_challenge
 
     # -- seeding ---------------------------------------------------------
 
-    def add_folder(self, folder_id: str, name: str, parent: str | None = None) -> dict:
-        folder = {"Id": folder_id, "Name": name, "Parent": parent}
+    def add_folder(self, folder_id: str, name: str) -> dict:
+        folder = {"Id": folder_id, "Name": name}
         self.folders[folder_id] = folder
         return folder
 
-    def add_user(self, user_id: str, username: str) -> dict:
-        user = {"Id": user_id, "Username": username}
-        self.users[user_id] = user
-        return user
+    # -- the browser -----------------------------------------------------
+
+    def open_url(self, url: str) -> None:
+        """What the app hands the browser. Signs in immediately by calling
+        the app's loopback redirect from another thread, the way a browser
+        would after the student typed their password."""
+        self.authorize_urls.append(url)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        redirect = query["redirect_uri"][0]
+        state = query["state"][0]
+        if self.refuse_login:
+            params = {"state": state, "error": "access_denied"}
+        else:
+            code = f"code-{len(self._pending) + 1}"
+            self._pending[code] = query["code_challenge"][0]
+            params = {"state": state, "code": code}
+        threading.Thread(
+            target=_hit, args=(f"{redirect}?{urllib.parse.urlencode(params)}",), daemon=True
+        ).start()
 
     # -- transport -------------------------------------------------------
 
@@ -78,7 +108,7 @@ class FakePanoptoSite:
         self.requests.append((method, path))
 
         if path.endswith("/oauth2/connect/token"):
-            return self._token(headers or {})
+            return self._token(body or b"", headers or {})
 
         if self.fail_next is not None:
             status, message = self.fail_next
@@ -89,189 +119,329 @@ class FakePanoptoSite:
         if self.expire_token or auth != f"Bearer {self.issued_token}":
             return _json_response(401, {"Message": "expired"})
 
+        payload = json.loads(body.decode("utf-8")) if body else None
+        if path.startswith(UPLOAD_API_ROOT):
+            return self._upload_api(method, path[len(UPLOAD_API_ROOT):], payload)
         if not path.startswith(API_ROOT):
             return _json_response(404, {"Message": "no such path"})
-        rest = path[len(API_ROOT):]
-        payload = json.loads(body.decode("utf-8")) if body else None
-        return self._api(method, rest, query, payload)
+        return self._api(method, path[len(API_ROOT):], query)
 
-    def _token(self, headers: dict) -> HttpResponse:
+    def _token(self, body: bytes, headers: dict) -> HttpResponse:
         self.token_requests += 1
-        expected = base64.b64encode(
-            f"{self._client_id}:{self._client_secret}".encode("utf-8")
-        ).decode("ascii")
-        if headers.get("Authorization") != f"Basic {expected}":
+        form = {k: v[0] for k, v in urllib.parse.parse_qs(body.decode("ascii")).items()}
+        if form.get("grant_type") != "authorization_code":
+            return _json_response(400, {"error": "unsupported_grant_type"})
+        if form.get("client_id") != self._client_id:
             return _json_response(400, {"error": "invalid_client"})
-        # A fresh token ends whatever made the old one stale.
-        self.expire_token = False
+        if self._client_secret is not None:
+            # As Panopto documents it: Basic auth, never the form body.
+            expected = base64.b64encode(
+                f"{self._client_id}:{self._client_secret}".encode("utf-8")
+            ).decode("ascii")
+            if headers.get("Authorization") != f"Basic {expected}" or "client_secret" in form:
+                return _json_response(401, {"error": "invalid_client"})
+        challenge = self._pending.pop(form.get("code", ""), None)
+        if challenge is None:
+            return _json_response(400, {"error": "invalid_grant"})
+        verifier = form.get("code_verifier", "").encode("ascii")
+        expected = base64.urlsafe_b64encode(hashlib.sha256(verifier).digest()).rstrip(b"=").decode()
+        if expected != challenge:
+            return _json_response(400, {"error": "invalid_grant", "detail": "pkce"})
         return _json_response(
             200, {"access_token": self.issued_token, "expires_in": self.token_lifetime}
         )
 
-    def _api(self, method: str, path: str, query: dict, payload: dict | None) -> HttpResponse:
-        if path == "/folders" and method == "POST":
-            folder_id = f"folder-{len(self.folders) + 1}"
-            return _json_response(
-                200, self.add_folder(folder_id, payload["Name"], payload["Parent"])
-            )
+    def _api(self, method: str, path: str, query: dict) -> HttpResponse:
+        if path.startswith("/folders/") and method == "GET":
+            folder = self.folders.get(urllib.parse.unquote(path[len("/folders/"):]))
+            if folder is None:
+                return _json_response(404, {"Message": "no such folder"})
+            return _json_response(200, folder)
+        return _json_response(404, {"Message": f"unhandled {method} {path}"})
 
-        if path == "/folders/search" and method == "GET":
-            needle = query.get("searchQuery", [""])[0].lower()
-            hits = [f for f in self.folders.values() if needle in f["Name"].lower()]
-            return _json_response(200, {"Results": hits})
+    def _upload_api(self, method: str, path: str, payload: dict | None) -> HttpResponse:
+        """Panopto's upload surface: ask, then say when the files are there."""
+        if path == "/sessionUpload" and method == "POST":
+            upload_id = f"upload-{len(self.uploads) + 1}"
+            record = {
+                "ID": upload_id,
+                "FolderId": payload["FolderId"],
+                "UploadTarget": f"https://s3.example.com/panopto-bucket/{upload_id}",
+                "State": 0,
+                "files": [],
+            }
+            self.uploads[upload_id] = record
+            return _json_response(200, record)
 
-        if path == "/users/search" and method == "GET":
-            needle = query.get("searchQuery", [""])[0].lower()
-            hits = [u for u in self.users.values() if needle in u["Username"].lower()]
-            return _json_response(200, {"Results": hits})
-
-        if path.startswith("/folders/"):
-            rest = path[len("/folders/"):]
-            if "/access/" in rest:
-                folder_id, user_id = rest.split("/access/", 1)
-                folder_id = urllib.parse.unquote(folder_id)
-                user_id = urllib.parse.unquote(user_id)
-                if folder_id not in self.folders:
-                    return _json_response(404, {"Message": "no such folder"})
-                grants = self.access.setdefault(folder_id, {})
-                if method == "PUT":
-                    grants[user_id] = query.get("role", [ROLE_VIEWER])[0]
-                    return _json_response(200, {})
-                if method == "DELETE":
-                    grants.pop(user_id, None)
-                    return _json_response(200, {})
-            if rest.endswith("/access") and method == "GET":
-                folder_id = urllib.parse.unquote(rest[: -len("/access")])
-                return _json_response(200, {"Grants": self.access.get(folder_id, {})})
+        if path.startswith("/sessionUpload/"):
+            upload_id = path[len("/sessionUpload/"):]
+            record = self.uploads.get(upload_id)
+            if record is None:
+                return _json_response(404, {"Message": "no such upload"})
+            if method == "PUT":
+                record["State"] = payload.get("State", record["State"])
+                if record["State"] == UPLOAD_STATE_COMPLETE:
+                    record["SessionId"] = f"session-{upload_id}"
+                return _json_response(200, record)
             if method == "GET":
-                folder = self.folders.get(urllib.parse.unquote(rest))
-                if folder is None:
-                    return _json_response(404, {"Message": "no such folder"})
-                return _json_response(200, folder)
+                return _json_response(200, record)
 
         return _json_response(404, {"Message": f"unhandled {method} {path}"})
+
+
+def _hit(url: str) -> None:
+    try:
+        urllib.request.urlopen(url, timeout=5).read()
+    except Exception as exc:  # noqa: BLE001 -- surfaced by the test's own timeout
+        print(f"loopback redirect failed: {exc}")
 
 
 def _json_response(status: int, payload: dict) -> HttpResponse:
     return HttpResponse(status=status, body=json.dumps(payload).encode("utf-8"))
 
 
+def make_login(site: FakePanoptoSite, secret: str | None = None, **kwargs) -> UserLogin:
+    return UserLogin(
+        HOST, CLIENT_ID, secret, site,
+        redirect_port=TEST_REDIRECT_PORT, open_url=site.open_url, timeout_s=5.0, **kwargs,
+    )
+
+
 def make_client(site: FakePanoptoSite) -> PanoptoClient:
-    auth = PanoptoAuth(HOST, CLIENT_ID, CLIENT_SECRET, site)
-    return PanoptoClient(HOST, auth, site)
+    """A client whose student has already signed in."""
+    login = make_login(site)
+    login.sign_in()
+    return PanoptoClient(HOST, login, site)
 
 
-class AuthTest(unittest.TestCase):
+class SignInTest(unittest.TestCase):
     def setUp(self):
         self.site = FakePanoptoSite()
 
-    def test_token_is_fetched_once_and_reused(self):
-        auth = PanoptoAuth(HOST, CLIENT_ID, CLIENT_SECRET, self.site)
-        self.assertEqual(auth.token(), "token-1")
-        self.assertEqual(auth.token(), "token-1")
+    def test_signs_in_through_the_loopback_redirect_with_pkce(self):
+        login = make_login(self.site)
+        self.assertFalse(login.signed_in)
+
+        login.sign_in()
+
+        self.assertTrue(login.signed_in)
+        self.assertEqual(login.token(), "token-1")
         self.assertEqual(self.site.token_requests, 1)
+        authorize = urllib.parse.parse_qs(urllib.parse.urlsplit(self.site.authorize_urls[0]).query)
+        self.assertEqual(authorize["code_challenge_method"], ["S256"])
+        self.assertEqual(authorize["redirect_uri"], [login.redirect_uri])
 
-    def test_expiry_is_shortened_so_a_token_cannot_die_in_flight(self):
-        # A 30s lifetime is entirely inside the 60s skew: it must never be
-        # treated as usable, or a call goes out with a token already dead.
-        self.site.token_lifetime = 30
-        auth = PanoptoAuth(HOST, CLIENT_ID, CLIENT_SECRET, self.site)
-        auth.token()
-        auth.token()
-        self.assertEqual(self.site.token_requests, 2)
+    def test_the_client_secret_is_sent_only_when_there_is_one(self):
+        strict = FakePanoptoSite(client_secret=CLIENT_SECRET)
+        with self.assertRaises(PanoptoAuthError):
+            make_login(strict).sign_in()  # none given, site demands one
+        login = make_login(strict, secret=CLIENT_SECRET)
+        login.sign_in()
+        self.assertTrue(login.signed_in)
 
-    def test_bad_credentials_raise_something_a_technician_can_act_on(self):
-        auth = PanoptoAuth(HOST, CLIENT_ID, "wrong", self.site)
+    def test_not_signed_in_is_an_auth_error_not_a_crash(self):
+        with self.assertRaises(PanoptoAuthError):
+            make_login(self.site).token()
+
+    def test_sign_out_forgets_the_token(self):
+        # A kiosk must never remember who was last here.
+        login = make_login(self.site)
+        login.sign_in()
+        login.sign_out()
+        self.assertFalse(login.signed_in)
+        with self.assertRaises(PanoptoAuthError):
+            login.token()
+
+    def test_a_refused_login_is_reported_as_such(self):
+        self.site.refuse_login = True
         with self.assertRaises(PanoptoAuthError) as caught:
-            auth.token()
-        self.assertIn("config.json", str(caught.exception))
+            make_login(self.site).sign_in()
+        self.assertIn("access_denied", str(caught.exception))
+
+    def test_a_cancelled_login_stops_waiting(self):
+        login = make_login(self.site)
+        login._open_url = lambda _url: None  # the browser never comes back
+        with self.assertRaises(LoginCancelled):
+            login.sign_in(cancel_cb=lambda: True)
+
+    def test_a_login_nobody_completes_times_out(self):
+        login = UserLogin(
+            HOST, CLIENT_ID, None, self.site,
+            redirect_port=TEST_REDIRECT_PORT, open_url=lambda _url: None, timeout_s=0.3,
+        )
+        with self.assertRaises(LoginCancelled) as caught:
+            login.sign_in()
+        self.assertIn("timed out", str(caught.exception))
+
+    def test_a_redirect_with_the_wrong_state_is_ignored(self):
+        # Someone hitting the loopback with a guessed or replayed code must
+        # not complete the sign-in.
+        def hostile_then_honest(url: str) -> None:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            redirect = query["redirect_uri"][0]
+            _hit(f"{redirect}?state=forged&code=stolen")
+            self.site.open_url(url)
+
+        login = make_login(self.site)
+        login._open_url = hostile_then_honest
+        login.sign_in()
+        self.assertEqual(login.token(), "token-1")
+
+    def test_an_expiry_inside_the_skew_is_not_treated_as_signed_in(self):
+        self.site.token_lifetime = 30
+        login = make_login(self.site)
+        login.sign_in()
+        self.assertFalse(login.signed_in)
+
+    def test_the_browser_is_closed_however_the_sign_in_ends(self):
+        # The window is signed into the student's Google account. It must
+        # not outlive sign_in() on any path -- success, refusal, or a
+        # student who walked away.
+        closed: list[str] = []
+
+        def opener_that_signs_in(url: str):
+            self.site.open_url(url)
+            return lambda: closed.append("success")
+
+        login = make_login(self.site)
+        login._open_url = opener_that_signs_in
+        login.sign_in()
+        self.assertEqual(closed, ["success"])
+
+        self.site.refuse_login = True
+        login._open_url = lambda url: (self.site.open_url(url), lambda: closed.append("refused"))[1]
+        with self.assertRaises(PanoptoAuthError):
+            login.sign_in()
+        self.assertEqual(closed, ["success", "refused"])
+
+        abandoned = UserLogin(
+            HOST, CLIENT_ID, None, self.site,
+            redirect_port=TEST_REDIRECT_PORT,
+            open_url=lambda _url: (lambda: closed.append("abandoned")),
+            timeout_s=0.2,
+        )
+        with self.assertRaises(LoginCancelled):
+            abandoned.sign_in()
+        self.assertEqual(closed, ["success", "refused", "abandoned"])
+
+    def test_an_opener_with_nothing_to_close_is_fine(self):
+        login = make_login(self.site)  # site.open_url returns None
+        login.sign_in()
+        self.assertTrue(login.signed_in)
+
+    def test_the_port_being_taken_is_a_clear_error(self):
+        import http.server
+
+        blocker = http.server.HTTPServer(
+            ("127.0.0.1", TEST_REDIRECT_PORT), http.server.BaseHTTPRequestHandler
+        )
+        self.addCleanup(blocker.server_close)
+        with self.assertRaises(PanoptoError) as caught:
+            make_login(self.site).sign_in()
+        self.assertIn(str(TEST_REDIRECT_PORT), str(caught.exception))
 
 
 class ClientTest(unittest.TestCase):
     def setUp(self):
         self.site = FakePanoptoSite()
-        self.site.add_folder("parent", "Practice Recordings")
+        self.site.add_folder("assign-1", "Slit lamp practice")
         self.client = make_client(self.site)
 
-    def test_expired_token_is_refreshed_once_and_the_call_succeeds(self):
-        self.client.folder("parent")  # prime the token
+    def test_reads_the_assignment_folder(self):
+        self.assertEqual(self.client.folder("assign-1")["Name"], "Slit lamp practice")
+
+    def test_a_401_drops_the_sign_in_and_asks_for_a_fresh_one(self):
+        # No silent retry: the student has to sign in again, and the
+        # viewer is what asks. Retrying here would hide the expiry.
         self.site.expire_token = True
-        self.site.issued_token = "token-2"
+        with self.assertRaises(PanoptoAuthError) as caught:
+            self.client.folder("assign-1")
+        self.assertIn("Sign in again", str(caught.exception))
+        self.assertFalse(self.client._auth.signed_in)
 
-        self.assertEqual(self.client.folder("parent")["Name"], "Practice Recordings")
-        self.assertEqual(self.site.token_requests, 2)
-
-    def test_a_401_that_survives_the_refresh_is_an_auth_error(self):
-        def always_401(method, url, *, headers=None, body=None, timeout=30.0):
-            if url.endswith("/oauth2/connect/token"):
-                return _json_response(200, {"access_token": "t", "expires_in": 3600})
-            return _json_response(401, {"Message": "nope"})
-
-        self.site.request = always_401
-        with self.assertRaises(PanoptoAuthError):
-            self.client.folder("parent")
+    def test_a_403_says_the_folder_is_the_problem(self):
+        self.site.fail_next = (403, "forbidden")
+        with self.assertRaises(PanoptoAuthError) as caught:
+            self.client.folder("assign-1")
+        self.assertIn("folder", str(caught.exception))
 
     def test_other_error_statuses_are_not_retried(self):
         self.site.fail_next = (500, "boom")
         with self.assertRaises(PanoptoError) as caught:
-            self.client.folder("parent")
+            self.client.folder("assign-1")
         self.assertIn("500", str(caught.exception))
-
-    def test_find_folder_matches_the_whole_name_not_a_prefix(self):
-        # The filing mistake that matters: "Jo Smith" must never resolve to
-        # "Jo Smithson", because that puts a recording of two students in a
-        # stranger's folder.
-        self.site.add_folder("f1", "Jo Smithson", parent="parent")
-        self.assertIsNone(self.client.find_folder("parent", "Jo Smith"))
-
-        self.site.add_folder("f2", "Jo Smith", parent="parent")
-        self.assertEqual(self.client.find_folder("parent", "Jo Smith")["Id"], "f2")
-
-    def test_find_folder_ignores_a_same_named_folder_under_another_parent(self):
-        self.site.add_folder("elsewhere", "Jo Smith", parent="some-other-parent")
-        self.assertIsNone(self.client.find_folder("parent", "Jo Smith"))
-
-    def test_ensure_folder_creates_once_then_finds(self):
-        created = self.client.ensure_folder("parent", "Jo Smith")
-        again = self.client.ensure_folder("parent", "Jo Smith")
-        self.assertEqual(created["Id"], again["Id"])
-        self.assertEqual(sum(1 for f in self.site.folders.values() if f["Name"] == "Jo Smith"), 1)
-
-    def test_grant_and_revoke_folder_access(self):
-        folder = self.client.ensure_folder("parent", "Jo Smith")
-        self.client.grant_folder_access(folder["Id"], "user-1", ROLE_VIEWER)
-        self.assertEqual(self.site.access[folder["Id"]], {"user-1": ROLE_VIEWER})
-
-        self.client.revoke_folder_access(folder["Id"], "user-1", ROLE_VIEWER)
-        self.assertEqual(self.site.access[folder["Id"]], {})
-
-    def test_find_user_is_exact(self):
-        self.site.add_user("u1", "jsmithson@neco.edu")
-        self.assertIsNone(self.client.find_user("jsmith@neco.edu"))
-        self.site.add_user("u2", "jsmith@neco.edu")
-        self.assertEqual(self.client.find_user("jsmith@neco.edu")["Id"], "u2")
+        self.assertEqual(sum(1 for m, p in self.site.requests if p.endswith("/assign-1")), 1)
 
     def test_viewer_url_carries_the_session_id(self):
         self.assertIn("id=abc-123", self.client.viewer_url("abc-123"))
 
 
-class UnverifiedSeamTest(unittest.TestCase):
-    """The upload calls must fail loudly until they are written against the
-    real API -- a silently-half-built uploader is the black pane again."""
+class UploadFlowTest(unittest.TestCase):
+    """The three calls written from Panopto's published sample. The double
+    answers them the way the sample says the real thing does; only the
+    probe can confirm that it really does."""
 
     def setUp(self):
-        self.client = make_client(FakePanoptoSite())
+        self.site = FakePanoptoSite()
+        self.site.add_folder("assign-1", "Slit lamp practice")
+        self.client = make_client(self.site)
 
-    def test_begin_upload_refuses_to_guess(self):
-        with self.assertRaises(PanoptoNotVerified):
-            self.client.begin_upload("parent")
+    def test_begin_upload_carries_the_folder_and_returns_a_target(self):
+        target = self.client.begin_upload("assign-1")
+        self.assertEqual(target.folder_id, "assign-1")
+        self.assertTrue(target.upload_id)
+        self.assertIn("panopto-bucket", target.destination)
+        self.assertEqual(self.site.uploads[target.upload_id]["FolderId"], "assign-1")
 
-    def test_transfer_and_finish_refuse_to_guess(self):
-        target = UploadTarget(upload_id="u", folder_id="parent", destination="nowhere")
-        with self.assertRaises(PanoptoNotVerified):
-            self.client.put_upload_file(target, __file__, "x.mp4")
-        with self.assertRaises(PanoptoNotVerified):
-            self.client.finish_upload(target)
+    def test_an_upload_target_splits_into_endpoint_bucket_and_prefix(self):
+        target = self.client.begin_upload("assign-1")
+        endpoint, bucket, prefix = target.s3_parts()
+        self.assertEqual(endpoint, "https://s3.example.com")
+        self.assertEqual(bucket, "panopto-bucket")
+        self.assertEqual(prefix, target.upload_id)
+
+    def test_a_target_that_is_not_an_s3_url_is_refused(self):
+        target = UploadTarget(upload_id="u", folder_id="f", destination="nonsense")
+        with self.assertRaises(PanoptoError):
+            target.s3_parts()
+
+    def test_finishing_sets_the_completed_state_and_returns_the_session_id(self):
+        target = self.client.begin_upload("assign-1")
+        session_id = self.client.finish_upload(target)
+        self.assertEqual(self.site.uploads[target.upload_id]["State"], UPLOAD_STATE_COMPLETE)
+        self.assertEqual(session_id, f"session-{target.upload_id}")
+
+    def test_a_sessionUpload_without_a_target_is_an_error_not_a_crash(self):
+        original = self.site.request
+
+        def no_target(method, url, **kwargs):
+            if url.endswith("/sessionUpload"):
+                return _json_response(200, {"ID": "u1"})
+            return original(method, url, **kwargs)
+
+        self.site.request = no_target
+        with self.assertRaises(PanoptoError):
+            self.client.begin_upload("assign-1")
+
+    def test_upload_state_reports_processing_progress(self):
+        target = self.client.begin_upload("assign-1")
+        self.assertEqual(self.client.upload_state(target.upload_id), 0)
+        self.site.uploads[target.upload_id]["State"] = UPLOAD_STATE_PROCESSED
+        self.assertEqual(self.client.upload_state(target.upload_id), UPLOAD_STATE_PROCESSED)
+
+    def test_the_transfer_says_what_is_missing_when_boto3_is_absent(self):
+        # boto3 is deliberately not a base requirement, so the machine
+        # running these tests usually has none. The message has to name the
+        # fix rather than surfacing an ImportError from inside a thread.
+        target = self.client.begin_upload("assign-1")
+        try:
+            import boto3  # noqa: F401
+        except ImportError:
+            with self.assertRaises(PanoptoError) as caught:
+                self.client.put_upload_file(target, __file__, "x.mp4")
+            self.assertIn("boto3", str(caught.exception))
+        else:
+            self.skipTest("boto3 is installed here, so the missing-dependency path can't run")
 
 
 if __name__ == "__main__":

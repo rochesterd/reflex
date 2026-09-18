@@ -17,8 +17,11 @@ from unittest.mock import patch
 import av
 import cv2
 
+import numpy as np
+
+from audio_capture import AudioCapture, SyntheticAudio
 from recorder import Recorder, _StreamWriter, _mp4_verifies
-from session_format import INSTRUMENT_STREAM, THIRD_PERSON_STREAM
+from session_format import AUDIO_STREAM, INSTRUMENT_STREAM, THIRD_PERSON_STREAM
 from session_reader import Session
 from synthetic_camera import SyntheticCamera
 
@@ -316,6 +319,108 @@ class TestRecorder(unittest.TestCase):
             self.assertFalse(_mp4_verifies(truncated, expected))
 
             self.assertFalse(_mp4_verifies(good, 0))  # nothing recorded -> never treat as sole copy
+
+
+
+class AudioRecordingTest(unittest.TestCase):
+    """The microphone as a third stream on the shared clock. Recorded with
+    SyntheticAudio through the real writer, remux and verify."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _record(self, seconds: float, mic=None) -> dict:
+        instrument = SyntheticCamera(160, 120, name="instrument", fps=30)
+        third = SyntheticCamera(160, 120, name="third", fps=30)
+        instrument.start()
+        third.start()
+        if mic is not None:
+            mic.start()
+        try:
+            recorder = Recorder(
+                instrument, third, instrument_key="slit_lamp",
+                output_root=self._tmp.name, fps=30, preset="ultrafast", audio=mic,
+            )
+            recorder.start()
+            time.sleep(seconds)
+            info = recorder.stop()
+        finally:
+            instrument.stop()
+            third.stop()
+            if mic is not None:
+                mic.stop()
+        self.session_dir = recorder.session_dir
+        return info
+
+    def test_no_microphone_means_no_audio_stream_and_nothing_else_changes(self):
+        info = self._record(1.0)
+        self.assertNotIn(AUDIO_STREAM, info["streams"])
+        self.assertEqual(set(info["streams"]), {INSTRUMENT_STREAM, THIRD_PERSON_STREAM})
+
+    def test_a_microphone_becomes_a_verified_m4a_on_the_session_clock(self):
+        info = self._record(1.5, SyntheticAudio())
+        audio = info["streams"][AUDIO_STREAM]
+        self.assertEqual(audio["kind"], "audio")
+        self.assertEqual(audio["file"], "audio.m4a")
+        self.assertTrue(audio["verified"])
+        self.assertEqual(audio["samplerate"], 48000)
+        self.assertGreater(audio["samples"], 48000)
+        self.assertFalse((self.session_dir / "audio.mka").exists(), "the interim MKA should be gone")
+
+        with av.open(str(self.session_dir / "audio.m4a")) as container:
+            stream = container.streams.audio[0]
+            self.assertEqual(stream.rate, 48000)
+            decoded = sum(frame.samples for frame in container.decode(stream))
+        self.assertGreater(decoded, 48000)
+
+    def test_audio_duration_matches_video_duration_closely(self):
+        # Both come off one clock, so they must agree to within a block
+        # plus the video's frame period -- no measured offset involved.
+        info = self._record(1.5, SyntheticAudio())
+        video_s = info["streams"][THIRD_PERSON_STREAM]["duration_s"]
+        audio_s = info["streams"][AUDIO_STREAM]["duration_s"]
+        self.assertLess(abs(video_s - audio_s), 0.15)
+
+    def test_a_gap_in_the_blocks_is_filled_with_silence(self):
+        # Push blocks by hand with a 200 ms hole: the writer must insert
+        # silence so what follows lands where its timestamp says.
+        mic = AudioCapture(device=None)
+        instrument = SyntheticCamera(160, 120, name="instrument", fps=30)
+        third = SyntheticCamera(160, 120, name="third", fps=30)
+        instrument.start()
+        third.start()
+        try:
+            recorder = Recorder(
+                instrument, third, instrument_key="slit_lamp",
+                output_root=self._tmp.name, fps=30, preset="ultrafast", audio=mic,
+            )
+            recorder.start()
+            origin = recorder._origin_monotonic
+            tone = (np.sin(np.arange(960) / 48000 * 2 * np.pi * 440) * 10000).astype(np.int16)[:, None]
+            t = origin + 0.1
+            for _ in range(10):
+                t += 0.02
+                mic.push(tone, timestamp=t)
+            t += 0.2  # the hole
+            for _ in range(10):
+                t += 0.02
+                mic.push(tone, timestamp=t)
+            time.sleep(0.5)
+            info = recorder.stop()
+        finally:
+            instrument.stop()
+            third.stop()
+        audio = info["streams"][AUDIO_STREAM]
+        self.assertGreater(audio["silence_inserted_samples"], 0.15 * 48000)
+        self.assertLess(audio["silence_inserted_samples"], 0.25 * 48000)
+        # Total samples = 20 blocks + the gap; duration ends where the last block ended.
+        self.assertAlmostEqual(audio["duration_s"], (t - origin), delta=0.03)
+
+    def test_the_session_duration_is_the_videos_not_the_microphones(self):
+        info = self._record(1.0, SyntheticAudio())
+        video_s = max(info["streams"][r]["duration_s"] for r in (INSTRUMENT_STREAM, THIRD_PERSON_STREAM))
+        self.assertEqual(info["duration_s"], video_s)
 
 
 if __name__ == "__main__":

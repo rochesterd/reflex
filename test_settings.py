@@ -14,11 +14,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLineEdit
 
-from config import load_config
+from config import (
+    AudioConfig,
+    PanoptoConfig,
+    StreamingConfig,
+    load_config,
+    panopto_secret_path,
+)
 from device_presets import CUSTOM_PROFILE_ID
-from settings import DeviceRow, SettingsWindow
+from secret_store import read_secret
+from settings import AudioSection, DeviceRow, PanoptoSection, SettingsWindow, StreamingSection
 from synthetic_camera import SyntheticCamera
 from uvc_enumeration import UvcDeviceInfo
 
@@ -355,7 +362,11 @@ class SettingsWindowTest(unittest.TestCase):
         them. See DECISIONS.md's 2026-09-09 "Config that would only fail
         at Start" entry.
         """
-        from config import load_config
+        from config import (
+    PanoptoConfig,
+    load_config,
+    panopto_secret_path,
+)
 
         data = json.loads(json.dumps(VALID_CONFIG))
         data["recording"] = {"fps": 24}
@@ -382,7 +393,11 @@ class SettingsWindowTest(unittest.TestCase):
     def test_save_drops_an_orientation_override_when_the_role_becomes_net2860(self):
         """The carry-forward must not paste an ids-only key onto a net2860
         entry, which config.py rejects."""
-        from config import load_config
+        from config import (
+    PanoptoConfig,
+    load_config,
+    panopto_secret_path,
+)
 
         data = json.loads(json.dumps(VALID_CONFIG))
         data["instruments"]["bio"]["orientation"] = "flip_vertical"
@@ -614,6 +629,287 @@ class SettingsWindowTest(unittest.TestCase):
             window._instrument_rows["bio"]._on_preview_clicked()
 
         self.assertEqual(calls, ["net2860_winusb"])
+
+
+class PanoptoSectionTest(unittest.TestCase):
+    """The technician-facing half of the Panopto integration.
+
+    The optional client secret is the thing worth testing hard: if given,
+    it must reach disk encrypted, must never be readable back out of the
+    window, and must not survive turning the integration off.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.config_path = Path(self._tmpdir.name) / "config.json"
+        self.secret_path = panopto_secret_path(self.config_path)
+        self.section = PanoptoSection(self.config_path)
+
+    def _fill(self, secret: str = "") -> None:
+        self.section.setChecked(True)
+        self.section.host_edit.setText("neco.hosted.panopto.com")
+        self.section.client_id_edit.setText("client-1")
+        self.section.folder_edit.setText("assign-1")
+        self.section.client_secret_edit.setText(secret)
+
+    def test_off_by_default_and_saveable(self):
+        self.assertFalse(self.section.isChecked())
+        self.assertEqual(self.section.problem(), "")
+
+    def test_an_incomplete_section_names_what_is_missing(self):
+        self.section.setChecked(True)
+        problem = self.section.problem()
+        self.assertIn("site host", problem)
+        self.assertIn("client ID", problem)
+        self.assertIn("assignment folder", problem)
+
+    def test_the_secret_is_optional(self):
+        # The loader doesn't insist on one -- the student's sign-in is the
+        # credential. A blank field must not block saving.
+        self._fill(secret="")
+        self.assertEqual(self.section.problem(), "")
+        data: dict = {}
+        self.assertEqual(self.section.apply_to(data), "")
+        self.assertFalse(self.secret_path.exists())
+        self.assertEqual(
+            data["panopto"],
+            {"host": "neco.hosted.panopto.com", "client_id": "client-1", "assignment_folder_id": "assign-1"},
+        )
+
+    def test_a_given_secret_is_encrypted_and_kept_out_of_the_json(self):
+        self._fill(secret="do-not-leak-me")
+        data: dict = {}
+        note = self.section.apply_to(data)
+
+        self.assertNotIn("client_secret", data["panopto"])
+        self.assertNotIn("do-not-leak-me", json.dumps(data))
+        self.assertIn("encrypted", note)
+        self.assertEqual(read_secret(self.secret_path), "do-not-leak-me")
+
+    def test_the_field_is_cleared_after_saving_and_never_refilled(self):
+        # A settings window left open on a kiosk must not be able to show
+        # anyone the credential it just stored.
+        self._fill(secret="s3cret")
+        self.section.apply_to({})
+        self.assertEqual(self.section.client_secret_edit.text(), "")
+
+        reopened = PanoptoSection(self.config_path)
+        reopened.load_from(
+            PanoptoConfig(
+                host="neco.hosted.panopto.com",
+                client_id="client-1",
+                assignment_folder_id="assign-1",
+                client_secret="s3cret",
+            )
+        )
+        self.assertEqual(reopened.client_secret_edit.text(), "")
+        self.assertIn("stored", reopened.client_secret_edit.placeholderText())
+
+    def test_the_secret_field_is_masked(self):
+        self.assertEqual(
+            self.section.client_secret_edit.echoMode(), QLineEdit.EchoMode.Password
+        )
+
+    def test_a_blank_secret_keeps_the_stored_one(self):
+        self._fill(secret="s3cret")
+        self.section.apply_to({})
+
+        self.section.client_secret_edit.setText("")
+        note = self.section.apply_to({})
+        self.assertEqual(note, "")
+        self.assertEqual(read_secret(self.secret_path), "s3cret")
+
+    def test_turning_the_integration_off_removes_the_credential(self):
+        # A machine that no longer uploads has no business still holding
+        # anything about the integration.
+        self._fill(secret="s3cret")
+        self.section.apply_to({})
+        self.assertTrue(self.secret_path.exists())
+
+        self.section.setChecked(False)
+        data = {"panopto": {"host": "x"}}
+        note = self.section.apply_to(data)
+
+        self.assertNotIn("panopto", data)
+        self.assertFalse(self.secret_path.exists())
+        self.assertIn("removed", note)
+
+    def test_a_hand_set_redirect_port_survives_a_save(self):
+        self._fill()
+        data = {"panopto": {"host": "old", "redirect_port": 50000}}
+        self.section.apply_to(data)
+        self.assertEqual(data["panopto"]["redirect_port"], 50000)
+
+    def test_loading_an_existing_config_fills_everything_but_the_secret(self):
+        self.section.load_from(
+            PanoptoConfig(
+                host="neco.hosted.panopto.com",
+                client_id="client-1",
+                assignment_folder_id="assign-1",
+                client_secret="s3cret",
+            )
+        )
+        self.assertTrue(self.section.isChecked())
+        self.assertEqual(self.section.host_edit.text(), "neco.hosted.panopto.com")
+        self.assertEqual(self.section.folder_edit.text(), "assign-1")
+        self.assertEqual(self.section.client_secret_edit.text(), "")
+
+
+class StreamingSectionTest(unittest.TestCase):
+    def setUp(self):
+        self.section = StreamingSection()
+
+    def test_off_by_default_and_writes_nothing_to_an_untouched_config(self):
+        self.assertFalse(self.section.isChecked())
+        data: dict = {}
+        self.section.apply_to(data)
+        self.assertNotIn("streaming", data)
+
+    def test_turning_it_on_writes_enabled_and_the_layout(self):
+        self.section.setChecked(True)
+        self.section.layout_combo.setCurrentIndex(self.section.layout_combo.findData("instrument"))
+        data: dict = {}
+        self.section.apply_to(data)
+        self.assertEqual(data["streaming"], {"enabled": True, "layout": "instrument"})
+
+    def test_turning_it_off_again_keeps_the_section_and_hand_set_values(self):
+        # A room that set a custom size keeps it across an off/on cycle.
+        data = {"streaming": {"enabled": True, "layout": "side_by_side", "width": 1280, "height": 720}}
+        self.section.setChecked(False)
+        self.section.apply_to(data)
+        self.assertEqual(
+            data["streaming"], {"enabled": False, "layout": "side_by_side", "width": 1280, "height": 720}
+        )
+
+    def test_loads_from_config(self):
+        self.section.load_from(StreamingConfig(enabled=True, layout="picture_in_picture"))
+        self.assertTrue(self.section.isChecked())
+        self.assertEqual(self.section.layout_combo.currentData(), "picture_in_picture")
+
+
+class AudioSectionTest(unittest.TestCase):
+    def _section(self, devices=(), capture_factory=None) -> AudioSection:
+        return AudioSection(list_devices_fn=lambda: list(devices), capture_factory=capture_factory)
+
+    def test_off_by_default_and_writes_nothing(self):
+        section = self._section([(1, "Mic A")])
+        self.assertFalse(section.isChecked())
+        data: dict = {}
+        section.apply_to(data)
+        self.assertNotIn("audio", data)
+
+    def test_lists_devices_by_name_after_the_default(self):
+        section = self._section([(1, "Mic A"), (5, "Mic A"), (2, "Mic B")])
+        names = [section.device_combo.itemText(i) for i in range(section.device_combo.count())]
+        self.assertEqual(names, ["System default microphone", "Mic A", "Mic B"])
+
+    def test_the_default_device_is_stored_as_no_device(self):
+        section = self._section([(1, "Mic A")])
+        section.setChecked(True)
+        data: dict = {}
+        section.apply_to(data)
+        self.assertEqual(data["audio"], {})
+
+    def test_a_chosen_device_is_stored_by_name_and_carries_hand_set_values(self):
+        section = self._section([(1, "Mic A")])
+        section.setChecked(True)
+        section.device_combo.setCurrentIndex(section.device_combo.findData("Mic A"))
+        data = {"audio": {"device": "old", "channels": 2}}
+        section.apply_to(data)
+        self.assertEqual(data["audio"], {"device": "Mic A", "channels": 2})
+
+    def test_a_configured_device_that_is_unplugged_is_still_offered(self):
+        section = self._section([(1, "Mic A")])
+        section.load_from(AudioConfig(device="Mic Gone"))
+        self.assertTrue(section.isChecked())
+        self.assertEqual(section.device_combo.currentData(), "Mic Gone")
+        self.assertIn("not connected", section.device_combo.currentText())
+
+    def test_turning_it_off_removes_the_section(self):
+        section = self._section([(1, "Mic A")])
+        data = {"audio": {"device": "Mic A"}}
+        section.setChecked(False)
+        section.apply_to(data)
+        self.assertNotIn("audio", data)
+
+    def test_test_microphone_reports_a_level(self):
+        class LoudCapture:
+            def __init__(self):
+                self.started = False
+            def start(self): self.started = True
+            def stop(self): self.started = False
+            def level(self): return 0.4
+            def get_latest(self): return object()
+
+        made = []
+        section = self._section([(1, "Mic A")], capture_factory=lambda device: made.append(LoudCapture()) or made[-1])
+        with patch("settings.QApplication.processEvents"):
+            section._on_test_clicked()
+        self.assertIn("Working", section.test_status.text())
+        self.assertFalse(made[0].started, "the test capture must be stopped afterwards")
+        self.assertTrue(section.test_button.isEnabled())
+
+    def test_test_microphone_reports_silence_and_failure_distinctly(self):
+        class SilentCapture(object):
+            def start(self): ...
+            def stop(self): ...
+            def level(self): return 0.0
+            def get_latest(self): return object()
+
+        section = self._section([(1, "Mic A")], capture_factory=lambda device: SilentCapture())
+        with patch("settings.QApplication.processEvents"):
+            section._on_test_clicked()
+        self.assertIn("silent", section.test_status.text())
+
+        def broken(device):
+            raise RuntimeError("PortAudio said no")
+
+        section = self._section([(1, "Mic A")], capture_factory=broken)
+        with patch("settings.QApplication.processEvents"):
+            section._on_test_clicked()
+        self.assertIn("PortAudio said no", section.test_status.text())
+
+
+class PanoptoSaveGateTest(SettingsWindowTest):
+    """A half-entered section must not be saveable: config.py refuses to
+    load a panopto section it can't complete, which would leave the kiosk
+    unable to start at all."""
+
+    def _ready_window(self) -> SettingsWindow:
+        window = self._make_window(
+            ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE]
+        )
+        for key, device in (("slit_lamp", SLIT_LAMP_DEVICE), ("bio", BIO_DEVICE)):
+            window._instrument_rows[key].set_pending_selection(device.serial)
+        window._third_person_row.set_pending_selection(THIRD_PERSON_DEVICE.vid_pid)
+        window.rescan()
+        return window
+
+    def test_save_is_allowed_with_the_integration_off(self):
+        window = self._ready_window()
+        self.assertTrue(window.save_button.isEnabled())
+
+    def test_a_half_entered_section_blocks_save(self):
+        window = self._ready_window()
+        window.panopto_section.setChecked(True)
+        window.panopto_section.host_edit.setText("neco.hosted.panopto.com")
+        self.assertFalse(window.save_button.isEnabled())
+
+    def test_a_complete_section_saves_and_reloads(self):
+        window = self._ready_window()
+        window.panopto_section.setChecked(True)
+        window.panopto_section.host_edit.setText("https://neco.hosted.panopto.com/Panopto/")
+        window.panopto_section.client_id_edit.setText("client-1")
+        window.panopto_section.folder_edit.setText("assign-1")
+        self.assertTrue(window.save_button.isEnabled())
+
+        window._on_save_clicked()
+
+        cfg = load_config(self.config_path)
+        self.assertEqual(cfg.panopto.host, "neco.hosted.panopto.com")  # URL reduced to a host
+        self.assertEqual(cfg.panopto.assignment_folder_id, "assign-1")
+        self.assertIsNone(cfg.panopto.client_secret)
 
 
 class PreviewDialogTest(unittest.TestCase):

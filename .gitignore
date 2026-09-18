@@ -18,5 +18,3 @@ vendor/
 *.mp4
 .vscode/
 smoke_test_frame*.png
-# Temporary working plan, not a tracked document (CLAUDE.md doc table)
-PANOPTO_PLAN.md

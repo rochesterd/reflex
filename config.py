@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -123,28 +123,87 @@ class RecordingConfig:
     fps: int
 
 
-# The two access models in the Notion brief's A/B table: one folder per
-# cohort, or one per student. Which one NECO picks is a policy decision
-# that isn't ours, so config carries the answer instead of the code
-# assuming one -- see ROADMAP.md's 2026-09-17 Panopto entry.
-ACCESS_MODEL_COHORT = "cohort"
-ACCESS_MODEL_PER_STUDENT = "per_student"
-VALID_ACCESS_MODELS = (ACCESS_MODEL_COHORT, ACCESS_MODEL_PER_STUDENT)
+# The microphone. Absent means a silent kiosk, which every config written
+# before audio existed is. The device goes by *name*, not index: an index
+# changes when a USB device is re-plugged, the same reason cameras go by
+# serial. None for the name means the system default input.
+DEFAULT_AUDIO_SAMPLERATE = 48000
+DEFAULT_AUDIO_CHANNELS = 1
+
+
+@dataclass
+class AudioConfig:
+    device: str | None = None
+    samplerate: int = DEFAULT_AUDIO_SAMPLERATE
+    channels: int = DEFAULT_AUDIO_CHANNELS
+
+
+# Stream mode: instead of recording, compose both feeds into a virtual
+# webcam for Panopto Capture to record (DECISIONS.md 2026-09-18). Layouts
+# mirror compositor.LAYOUT_MODES, restated so config.py imports nothing;
+# a test holds the two together.
+STREAM_LAYOUTS = ("side_by_side", "picture_in_picture", "instrument", "third_person")
+DEFAULT_STREAM_LAYOUT = "side_by_side"
+DEFAULT_STREAM_FPS = 30
+DEFAULT_STREAM_WIDTH = 1920
+DEFAULT_STREAM_HEIGHT = 1080
+
+
+@dataclass
+class StreamingConfig:
+    """Off means record mode -- the default, and every existing config.
+    On means the kiosk records nothing: it publishes the composed feed as
+    a virtual camera and Panopto Capture, signed in as the student, does
+    the recording."""
+
+    enabled: bool = False
+    layout: str = DEFAULT_STREAM_LAYOUT
+    fps: int = DEFAULT_STREAM_FPS
+    width: int = DEFAULT_STREAM_WIDTH
+    height: int = DEFAULT_STREAM_HEIGHT
+
+    @property
+    def size(self) -> tuple[int, int]:
+        return (self.width, self.height)
+
+
+# The client secret, if IT issued one, is never in config.json. It lives
+# beside it, encrypted to this machine (secret_store.py). It is low-value
+# -- an authorization-code client's secret cannot mint a token without a student
+# signing in -- but a secret in a JSON file is still the wrong habit, and
+# the store was cheap. settings.py writes both; neither is hand-edited.
+PANOPTO_SECRET_NAME = "panopto.secret"
+
+# Matches panopto_api.DEFAULT_REDIRECT_PORT; restated so config.py stays
+# free of that import. A test holds the two together.
+DEFAULT_PANOPTO_REDIRECT_PORT = 48219
+
+
+def panopto_secret_path(config_path: Path | str = None) -> Path:
+    """Where this machine's Panopto secret lives: beside its config.json."""
+    config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    return config_path.parent / PANOPTO_SECRET_NAME
 
 
 @dataclass
 class PanoptoConfig:
-    """Where uploaded sessions go, and what may talk to Panopto.
+    """Where a signed-in student's session is uploaded.
 
-    Credentials, not calibration: unlike the rest of config.json these are
-    hand-entered from what IT issues, not written by settings.py.
+    There is no service account and no credential that acts on its own
+    (DECISIONS.md 2026-09-18): the student signs in through the browser and
+    uploads as themselves into `assignment_folder_id`, a Panopto
+    Assignment Folder where each student sees only their own submissions
+    and faculty see all. `client_secret` is None unless IT issued one for
+    the API client (Panopto's "Server-side Web Application" type, which
+    is its authorization-code client), and then it is the decrypted value, in
+    memory only.
     """
 
     host: str  # site hostname only, e.g. "neco.hosted.panopto.com"
     client_id: str
-    client_secret: str
-    parent_folder_id: str
-    access_model: str = ACCESS_MODEL_COHORT
+    assignment_folder_id: str
+    client_secret: str | None = None
+    redirect_port: int = DEFAULT_PANOPTO_REDIRECT_PORT
 
 
 @dataclass
@@ -157,6 +216,10 @@ class AppConfig:
     # until credentials exist, so it must never be an error: the drive
     # export is still there. viewer.py offers an upload only when this is set.
     panopto: PanoptoConfig | None = None
+    streaming: StreamingConfig = field(default_factory=StreamingConfig)
+    # None means no microphone: record mode is silent, and stream mode's
+    # audio is the browser's business either way.
+    audio: AudioConfig | None = None
 
 
 def achievable_fps(exposure_time_us: float) -> float:
@@ -218,12 +281,16 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> AppConfig:
 
     recording = _parse_recording(path, raw.get("recording"))
     panopto = _parse_panopto(path, raw.get("panopto"))
+    streaming = _parse_streaming(path, raw.get("streaming"))
+    audio = _parse_audio(path, raw.get("audio"))
 
     config = AppConfig(
         instruments=instruments,
         third_person=third_person,
         recording=recording,
         panopto=panopto,
+        streaming=streaming,
+        audio=audio,
     )
     for message in exposure_fps_warnings(config):
         logger.warning("%s: %s", path, message)
@@ -393,19 +460,73 @@ def _parse_recording(path: Path, entry: object) -> RecordingConfig:
     return RecordingConfig(fps=int(fps))
 
 
+def _parse_audio(path: Path, entry: object) -> "AudioConfig | None":
+    """Optional. Absent is silent. Present-and-wrong is an error, so a
+    kiosk meant to record sound never quietly records none."""
+    if entry is None:
+        return None
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{path}: 'audio' must be an object. {_FIX_HINT}")
+    device = entry.get("device")
+    if device is not None and (not isinstance(device, str) or not device.strip()):
+        raise ConfigError(f"{path}: audio.device must be a device name, or omitted for the default. {_FIX_HINT}")
+    samplerate = _positive_int(path, "audio.samplerate", entry.get("samplerate", DEFAULT_AUDIO_SAMPLERATE))
+    channels = _positive_int(path, "audio.channels", entry.get("channels", DEFAULT_AUDIO_CHANNELS))
+    if channels > 2:
+        raise ConfigError(f"{path}: audio.channels must be 1 or 2. {_FIX_HINT}")
+    return AudioConfig(device=device.strip() if device else None, samplerate=samplerate, channels=channels)
+
+
+def _parse_streaming(path: Path, entry: object) -> StreamingConfig:
+    """Optional; absent is record mode. Present-and-wrong is an error, for
+    the usual reason: a kiosk that was meant to stream and silently
+    records instead has two students' faces in a buffer nobody will look
+    at, and a Panopto session with nothing in it."""
+    if entry is None:
+        return StreamingConfig()
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{path}: 'streaming' must be an object. {_FIX_HINT}")
+
+    enabled = entry.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"{path}: streaming.enabled must be true or false. {_FIX_HINT}")
+
+    layout = entry.get("layout", DEFAULT_STREAM_LAYOUT)
+    if layout not in STREAM_LAYOUTS:
+        raise ConfigError(
+            f"{path}: streaming.layout must be one of {', '.join(STREAM_LAYOUTS)}. {_FIX_HINT}"
+        )
+
+    fps = _positive_int(path, "streaming.fps", entry.get("fps", DEFAULT_STREAM_FPS))
+    width = _positive_int(path, "streaming.width", entry.get("width", DEFAULT_STREAM_WIDTH))
+    height = _positive_int(path, "streaming.height", entry.get("height", DEFAULT_STREAM_HEIGHT))
+    if width % 2 or height % 2:
+        # Browsers and encoders want even dimensions; an odd canvas fails
+        # somewhere downstream with a message nobody can act on.
+        raise ConfigError(f"{path}: streaming.width and height must be even. {_FIX_HINT}")
+
+    return StreamingConfig(enabled=enabled, layout=layout, fps=fps, width=width, height=height)
+
+
 def _parse_panopto(path: Path, entry: object) -> "PanoptoConfig | None":
     """Optional section; absent means uploads are off, which is valid.
 
     Deliberately absent from config.example.json too: the example must stay
-    loadable as copied, and a placeholder credential would fail every
-    machine that has no Panopto site. The shape is:
+    loadable as copied, and a placeholder would fail every machine that has
+    no Panopto site. The shape is:
 
         "panopto": {
           "host": "neco.hosted.panopto.com",
-          "client_id": "...", "client_secret": "...",
-          "parent_folder_id": "...",
-          "access_model": "cohort" | "per_student"
+          "client_id": "...",
+          "assignment_folder_id": "...",
+          "redirect_port": 48219          // optional
         }
+
+    A client *secret*, if IT issued one, is not in here and must not be:
+    it sits beside this file, encrypted to the machine (secret_store.py),
+    written by settings.py. Optional in the loader, though Panopto's
+    "Server-side Web Application" clients are issued one and its own sample
+    sends it in the code exchange -- expect to enter it.
 
     Present-but-incomplete is an error rather than a fallback to off. A
     half-filled section means someone was configuring uploads and didn't
@@ -417,8 +538,17 @@ def _parse_panopto(path: Path, entry: object) -> "PanoptoConfig | None":
     if not isinstance(entry, dict):
         raise ConfigError(f"{path}: 'panopto' must be an object. {_FIX_HINT}")
 
+    if "client_secret" in entry:
+        # Refused rather than accepted-with-a-warning: accepting it would
+        # make a plaintext secret on a kiosk the normal case, which the
+        # encrypted store exists to prevent -- even for a low-value one.
+        raise ConfigError(
+            f"{path}: panopto.client_secret must not be stored in config.json. "
+            f"Enter it in Settings, which encrypts it to this machine."
+        )
+
     values: dict[str, str] = {}
-    for field_name in ("host", "client_id", "client_secret", "parent_folder_id"):
+    for field_name in ("host", "client_id", "assignment_folder_id"):
         value = entry.get(field_name)
         if not isinstance(value, str) or not value.strip():
             raise ConfigError(
@@ -435,14 +565,38 @@ def _parse_panopto(path: Path, entry: object) -> "PanoptoConfig | None":
         raise ConfigError(f"{path}: panopto.host has no hostname in it. {_FIX_HINT}")
     values["host"] = host
 
-    access_model = entry.get("access_model", ACCESS_MODEL_COHORT)
-    if access_model not in VALID_ACCESS_MODELS:
+    redirect_port = entry.get("redirect_port", DEFAULT_PANOPTO_REDIRECT_PORT)
+    if isinstance(redirect_port, bool) or not isinstance(redirect_port, int) or not 1024 <= redirect_port <= 65535:
         raise ConfigError(
-            f"{path}: panopto.access_model must be one of "
-            f"{', '.join(VALID_ACCESS_MODELS)}. {_FIX_HINT}"
+            f"{path}: panopto.redirect_port must be a whole number between 1024 and 65535. "
+            f"It has to match the redirect URI registered with IT."
         )
 
-    return PanoptoConfig(access_model=access_model, **values)
+    return PanoptoConfig(
+        client_secret=_read_panopto_secret(path),
+        redirect_port=redirect_port,
+        **values,
+    )
+
+
+def _read_panopto_secret(config_path: Path) -> str | None:
+    """The decrypted client secret, None if none was stored, or a
+    ConfigError naming the fix if one was stored and can't be read.
+
+    Imported here rather than at module scope so config.py stays importable
+    where secret_store's Windows-only DPAPI is not -- the same reason this
+    module never imports a camera.
+    """
+    secret_path = panopto_secret_path(config_path)
+    if not secret_path.exists():
+        return None
+    from secret_store import SecretError, read_secret
+
+    try:
+        secret = read_secret(secret_path)
+    except SecretError as exc:
+        raise ConfigError(f"{secret_path}: {exc}") from exc
+    return secret.strip() or None
 
 
 def _positive_int(path: Path, field_name: str, value: object) -> int:

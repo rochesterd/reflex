@@ -18,9 +18,13 @@ from PySide6.QtWidgets import QApplication, QDialog, QMainWindow
 from unittest.mock import patch
 
 import viewer
+from config import PanoptoConfig
+from panopto_api import MANIFEST_FILENAME
 from session_format import INSTRUMENT_STREAM, THIRD_PERSON_STREAM
 from session_buffer import Drive
 from session_reader import Session
+from test_panopto_api import HOST as PANOPTO_HOST, TEST_REDIRECT_PORT, FakePanoptoSite, make_login
+from test_panopto_upload import InMemoryUploadClient
 from test_session_reader import record_session
 from viewer import ViewerDialog, _mmss
 
@@ -304,6 +308,272 @@ class ViewerExportTest(unittest.TestCase):
         with patch("viewer.QMessageBox.warning") as warn:
             dialog._report_export({}, out)
         warn.assert_called_once()
+
+
+def _panopto_config():
+    return PanoptoConfig(
+        host=PANOPTO_HOST,
+        client_id="reflex-kiosk",
+        assignment_folder_id="assign-1",
+        redirect_port=TEST_REDIRECT_PORT,
+    )
+
+
+class _FakeMessageBox:
+    """Stands in for viewer.QMessageBox in _offer_retry: records what was
+    shown and answers with whichever button the test chose."""
+
+    Icon = viewer.QMessageBox.Icon
+    ButtonRole = viewer.QMessageBox.ButtonRole
+    shown: list[dict] = []
+    answer = "Not now"
+
+    def __init__(self, _parent=None):
+        self._buttons: dict[str, object] = {}
+        self._record: dict = {}
+        _FakeMessageBox.shown.append(self._record)
+
+    def setIcon(self, *_a): ...
+    def setWindowTitle(self, title): self._record["title"] = title
+    def setText(self, text): self._record["text"] = text
+    def setDefaultButton(self, *_a): ...
+
+    def addButton(self, label, _role):
+        button = object()
+        self._buttons[label] = button
+        return button
+
+    def exec(self): ...
+
+    def clickedButton(self):
+        return self._buttons.get(_FakeMessageBox.answer)
+
+
+class ViewerPanoptoTest(unittest.TestCase):
+    """The Send-to-Panopto wiring. The sign-in and upload engines are
+    covered by test_panopto_api.py and test_panopto_upload.py; these cover
+    that the button exists only when configured, that the worker signs
+    out on every path, and that each outcome reaches the student -- with a
+    Retry, and never a silent loss."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.session_dir = record_session(cls._tmp.name, 2)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        self.site = FakePanoptoSite()
+        self.site.add_folder("assign-1", "Slit lamp practice")
+        self.login = make_login(self.site)
+        self.client = InMemoryUploadClient(self.site)
+        self.exported: list = []
+
+    def _dialog(self, configured: bool = True) -> ViewerDialog:
+        dialog = ViewerDialog(
+            Session.load(self.session_dir),
+            on_export=self.exported.append,
+            panopto=_panopto_config() if configured else None,
+            panopto_session_factory=lambda _cfg: (self.login, self.client),
+        )
+        self.addCleanup(dialog._shutdown)
+        return dialog
+
+    def _run_worker(self):
+        worker = viewer._PanoptoWorker(
+            Session.load(self.session_dir), self.login, self.client, "assign-1"
+        )
+        outcomes: list[tuple[str, str]] = []
+        worker.done.connect(lambda url: outcomes.append(("done", url)))
+        worker.failed.connect(lambda msg: outcomes.append(("failed", msg)))
+        worker.sign_in_failed.connect(lambda msg: outcomes.append(("sign_in_failed", msg)))
+        worker.cancelled.connect(lambda: outcomes.append(("cancelled", "")))
+        return worker, outcomes
+
+    # -- presence --------------------------------------------------------
+
+    def test_the_button_exists_only_when_panopto_is_configured(self):
+        self.assertTrue(self._dialog(configured=False).panopto_button.isHidden())
+        self.assertFalse(self._dialog(configured=True).panopto_button.isHidden())
+
+    def test_clicking_without_config_does_nothing(self):
+        dialog = self._dialog(configured=False)
+        with patch.object(ViewerDialog, "_run_panopto_upload") as run:
+            dialog._on_panopto_clicked()
+        run.assert_not_called()
+
+    # -- the worker ------------------------------------------------------
+
+    def test_a_full_run_signs_in_uploads_and_signs_out(self):
+        worker, outcomes = self._run_worker()
+        worker.run()
+
+        self.assertEqual(outcomes[0][0], "done")
+        self.assertTrue(outcomes[0][1].startswith(f"https://{PANOPTO_HOST}/"))
+        self.assertEqual(
+            set(self.client.received), {"third_person.mp4", "instrument.mp4", MANIFEST_FILENAME}
+        )
+        self.assertEqual(self.site.uploads["upload-1"]["FolderId"], "assign-1")
+        self.assertFalse(self.login.signed_in, "the token outlived the upload")
+
+    def test_a_refused_sign_in_is_its_own_outcome(self):
+        self.site.refuse_login = True
+        worker, outcomes = self._run_worker()
+        worker.run()
+        self.assertEqual(outcomes[0][0], "sign_in_failed")
+        self.assertEqual(self.client.received, {})
+
+    def test_an_upload_failure_is_reported_and_still_signs_out(self):
+        original = self.site.request
+
+        def broken_upload(method, url, **kwargs):
+            if url.endswith("/sessionUpload"):
+                return viewer_test_json(500, {"Message": "storage unavailable"})
+            return original(method, url, **kwargs)
+
+        self.site.request = broken_upload
+        worker, outcomes = self._run_worker()
+        worker.run()
+        self.assertEqual(outcomes[0][0], "failed")
+        self.assertIn("500", outcomes[0][1])
+        self.assertFalse(self.login.signed_in)
+
+    def test_cancelling_before_sign_in_completes_is_quiet(self):
+        worker, outcomes = self._run_worker()
+        self.login._open_url = lambda _url: None  # the browser never comes back
+        worker.cancel()
+        worker.run()
+        self.assertEqual(outcomes, [("cancelled", "")])
+        self.assertEqual(self.client.received, {})
+        self.assertFalse(self.login.signed_in)
+
+    # -- reporting -------------------------------------------------------
+
+    def test_success_is_reported_to_the_kiosk_with_the_url(self):
+        dialog = self._dialog()
+        with patch("viewer.QMessageBox.information") as info:
+            dialog._report_panopto({"kind": "done", "payload": "https://x/viewer?id=1"})
+        self.assertEqual(self.exported, ["https://x/viewer?id=1"])
+        info.assert_called_once()
+
+    def test_failures_offer_a_retry_and_do_not_mark_exported(self):
+        dialog = self._dialog()
+        for kind in ("failed", "sign_in_failed"):
+            with self.subTest(kind=kind):
+                with patch.object(ViewerDialog, "_offer_retry") as offer:
+                    dialog._report_panopto({"kind": kind, "payload": "nope"})
+                offer.assert_called_once()
+                self.assertIn("nope", offer.call_args.args[1])
+        self.assertEqual(self.exported, [])
+
+    def test_retry_runs_the_upload_again_and_not_now_does_not(self):
+        dialog = self._dialog()
+        _FakeMessageBox.shown.clear()
+        with patch("viewer.QMessageBox", _FakeMessageBox):
+            _FakeMessageBox.answer = "Try again"
+            with patch.object(ViewerDialog, "_run_panopto_upload") as run:
+                dialog._offer_retry("Upload failed", "storage unavailable")
+            run.assert_called_once()
+
+            _FakeMessageBox.answer = "Not now"
+            with patch.object(ViewerDialog, "_run_panopto_upload") as run:
+                dialog._offer_retry("Upload failed", "storage unavailable")
+            run.assert_not_called()
+
+        # The student is told the recording is still there, every time.
+        for record in _FakeMessageBox.shown:
+            self.assertIn("still here", record["text"])
+
+    def test_cancel_and_no_outcome_are_not_reported_as_success(self):
+        dialog = self._dialog()
+        dialog._report_panopto({"kind": "cancelled"})
+        self.assertIn("cancelled", dialog.status_label.text().lower())
+
+        with patch("viewer.QMessageBox.warning") as warn:
+            dialog._report_panopto({})
+        warn.assert_called_once()
+        self.assertEqual(self.exported, [])
+
+
+def viewer_test_json(status: int, payload: dict):
+    from panopto_api import HttpResponse
+    import json as _json
+
+    return HttpResponse(status=status, body=_json.dumps(payload).encode("utf-8"))
+
+
+
+class ViewerAudioTest(unittest.TestCase):
+    """The viewer drives the audio player from its own transport: play
+    starts sound at the video's position, pause silences it, a scrub moves
+    it, and a silent session simply has none."""
+
+    @classmethod
+    def setUpClass(cls):
+        from test_audio_playback import record_with_audio
+
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.audible = record_with_audio(cls._tmp.name, 1.5)
+        cls.silent_dir = record_session(cls._tmp.name, 1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _dialog(self, session) -> ViewerDialog:
+        class FakeAudio:
+            def __init__(self, path, offset_s=0.0):
+                self.calls: list[tuple] = []
+                self.closed = False
+            def play(self, t): self.calls.append(("play", round(t, 2)))
+            def pause(self): self.calls.append(("pause",))
+            def seek(self, t): self.calls.append(("seek", round(t, 2)))
+            def close(self): self.closed = True
+
+        with patch("viewer.AudioPlayer", FakeAudio):
+            dialog = ViewerDialog(session)
+        self.addCleanup(dialog._shutdown)
+        return dialog
+
+    def test_a_silent_session_has_no_audio_player(self):
+        dialog = self._dialog(Session.load(self.silent_dir))
+        self.assertIsNone(dialog.audio)
+        self.assertNotIn("sound", dialog.status_label.text())
+
+    def test_an_audible_session_gets_a_player_and_says_so(self):
+        dialog = self._dialog(self.audible)
+        self.assertIsNotNone(dialog.audio)
+        self.assertIn("with sound", dialog.status_label.text())
+
+    def test_transport_drives_the_audio(self):
+        dialog = self._dialog(self.audible)
+        dialog._set_playing(True)
+        self.assertEqual(dialog.audio.calls[-1], ("play", 0.0))
+        dialog._set_playing(False)
+        self.assertEqual(dialog.audio.calls[-1], ("pause",))
+        dialog._on_scrub_move(viewer.SLIDER_STEPS // 2)
+        self.assertEqual(dialog.audio.calls[-1][0], "seek")
+        self.assertAlmostEqual(dialog.audio.calls[-1][1], round(dialog.player.position, 2), places=2)
+
+    def test_shutdown_closes_the_audio(self):
+        dialog = self._dialog(self.audible)
+        audio = dialog.audio
+        dialog._shutdown()
+        self.assertTrue(audio.closed)
+        self.assertIsNone(dialog.audio)
+
+    def test_a_speaker_that_cannot_open_does_not_lose_the_viewer(self):
+        def broken(path, offset_s=0.0):
+            raise RuntimeError("no output device")
+
+        with patch("viewer.AudioPlayer", broken):
+            dialog = ViewerDialog(self.audible)
+        self.addCleanup(dialog._shutdown)
+        self.assertIsNone(dialog.audio)
+        self.assertIn("no speaker", dialog.status_label.text())
 
 
 def _drive(letter: str, label: str = "") -> Drive:

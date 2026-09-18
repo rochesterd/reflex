@@ -22,6 +22,7 @@ from typing import Callable
 import numpy as np
 
 from camera import BaseCamera
+from audio_capture import AudioCapture
 from recorder import Recorder
 
 logger = logging.getLogger(__name__)
@@ -226,8 +227,13 @@ class KioskController:
         disk_usage_fn: Callable[[str], object] = shutil.disk_usage,
         recorder_factory: Callable[[BaseCamera, str], Recorder] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        # The microphone, already started by app.py and running for the
+        # app's lifetime like the third-person camera. None is a silent
+        # kiosk -- every one before audio existed.
+        audio: AudioCapture | None = None,
     ):
         self.third_person_camera = third_person_camera
+        self.audio = audio
         self.instruments = instruments
         self.output_root = Path(output_root)
         self.width = width
@@ -252,6 +258,7 @@ class KioskController:
                 third_person_label=self._third_person_label,
                 output_root=str(self.output_root),
                 fps=self.fps,
+                audio=self.audio,
             )
         )
 
@@ -479,7 +486,19 @@ class KioskController:
         if self.selected_instrument is None:
             return False
         instrument_camera = self.instruments[self.selected_instrument]
-        return self.third_person_camera.get_latest() is not None and instrument_camera.get_latest() is not None
+        if self.third_person_camera.get_latest() is None or instrument_camera.get_latest() is None:
+            return False
+        # A microphone that is configured but silent-by-absence is a
+        # session recorded without sound, which nobody notices until
+        # playback. Gate on blocks arriving; loudness is the technician's
+        # meter in settings.py, not a gate -- a quiet room is legitimate.
+        return self.audio is None or self.audio.get_latest() is not None
+
+    @property
+    def microphone_waiting(self) -> bool:
+        """True when a microphone is configured and hasn't delivered yet --
+        so app.py can name it, rather than say "waiting for cameras"."""
+        return self.audio is not None and self.audio.get_latest() is None
 
     # --- Recording ------------------------------------------------------
 

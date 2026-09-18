@@ -125,6 +125,47 @@ Self-signed is enough because the package ships no binaries of its own
 `winusb.inf`), so Kernel Mode Code Signing — the gate needing an EV
 certificate — never applies. See DECISIONS.md's 2026-09-09 entries.
 
+## 2c. Get the virtual camera filter into `vendor/`
+
+Stream mode (`streaming.enabled` in config.json; DECISIONS.md 2026-09-18)
+publishes the composed feed as a webcam for Panopto Capture. Windows has
+no user-mode way to do that, so the installer registers a DirectShow
+virtual camera filter -- Unity Capture's, a single MIT-licensed DLL. No
+OBS, no second installer: `reflex.iss` ships it with the `regserver`
+flag, which registers it at install and unregisters it at uninstall.
+
+`reflex.iss` expects, exactly:
+
+```
+vendor\unitycapture\UnityCaptureFilter64.dll
+vendor\unitycapture\NOTICE.txt
+```
+
+Fetch the DLL from
+https://github.com/schellingb/UnityCapture/raw/master/Install/UnityCaptureFilter64.dll
+(the `Install/` folder of that repository), and write `NOTICE.txt` naming
+the source and the MIT licence -- the filter is redistributed unmodified,
+and MIT asks for attribution. `vendor/` is gitignored, so this is a
+per-build-machine step like the IDS installer in section 3.
+
+The camera appears to browsers as **"Unity Video Capture"**; `app.py`'s
+status line names whatever the driver calls itself, so that is what the
+student picks in Panopto Capture. `pyvirtualcam` also drives the OBS
+Virtual Camera if one happens to be registered, but nothing here needs
+it. A record-mode kiosk carries the filter unused.
+
+Unverified on a clinic machine: that Edge's `getUserMedia` takes the
+filter and Panopto Capture records from it at the size sent. Register it
+(`regsvr32 UnityCaptureFilter64.dll`, elevated), run `app.py --synthetic`
+with streaming on, open Panopto Capture in Edge, and look for the
+synthetic feed with its burned-in counter. `test_virtual_camera.py`'s
+real-driver test also stops skipping once a filter is registered.
+
+The three lazily-imported dependencies (`pyvirtualcam`, `sounddevice`,
+`boto3`) are named in both `.spec` files' `hiddenimports` so the static
+scan cannot miss them; `sounddevice` carries its own PortAudio DLL, which
+PyInstaller's hook collects.
+
 ## 3. Get the IDS peak extended installer into `vendor/`
 
 `packaging/reflex.iss` expects the IDS peak **extended** setup

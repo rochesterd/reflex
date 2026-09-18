@@ -16,6 +16,11 @@ from unittest.mock import patch
 import numpy as np
 
 import kiosk
+import shutil
+
+import numpy as np
+
+from audio_capture import AudioCapture, SyntheticAudio
 from kiosk import (
     REQUIRED_SPACE_MULTIPLIER,
     KioskController,
@@ -987,6 +992,63 @@ class BrightnessTests(unittest.TestCase):
                 self.assertEqual(controller.brightness, 0.0)
             finally:
                 instrument.stop()
+
+
+
+class MicrophoneGateTest(unittest.TestCase):
+    """A configured microphone that hasn't delivered is something a student
+    can't see, so Start stays disabled until it has -- the same rule as a
+    camera that isn't live."""
+
+    def setUp(self):
+        self.third = SyntheticCamera(160, 120, fps=30)
+        self.instrument = SyntheticCamera(160, 120, fps=30)
+        self.third.start()
+        self.instrument.start()
+        self.addCleanup(self.third.stop)
+        self.addCleanup(self.instrument.stop)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and (self.third.get_latest() is None or self.instrument.get_latest() is None):
+            time.sleep(0.01)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _controller(self, audio) -> KioskController:
+        controller = KioskController(
+            self.third, {"slit_lamp": self.instrument}, output_root=self._tmp.name, audio=audio,
+            disk_usage_fn=lambda _p: shutil._ntuple_diskusage(10**12, 0, 10**12),
+        )
+        controller.select_instrument("slit_lamp")
+        return controller
+
+    def test_no_microphone_changes_nothing(self):
+        controller = self._controller(None)
+        self.assertTrue(controller.poll_preflight().cameras_ready)
+        self.assertFalse(controller.microphone_waiting)
+
+    def test_a_silent_by_absence_microphone_blocks_readiness_until_it_delivers(self):
+        mic = AudioCapture(device=None)  # never started; delivers only what we push
+        controller = self._controller(mic)
+        self.assertFalse(controller.poll_preflight().cameras_ready)
+        self.assertTrue(controller.microphone_waiting)
+
+        mic.push(np.zeros((960, 1), dtype=np.int16))
+        self.assertTrue(controller.poll_preflight().cameras_ready)
+        self.assertFalse(controller.microphone_waiting)
+
+    def test_the_recorder_gets_the_microphone(self):
+        mic = SyntheticAudio()
+        mic.start()
+        self.addCleanup(mic.stop)
+        controller = self._controller(mic)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not controller.poll_preflight().ok:
+            time.sleep(0.02)
+        controller.start_recording()
+        time.sleep(0.7)
+        info = controller.stop_recording()
+        self.assertIn("audio", info["streams"])
+        self.assertTrue(info["streams"]["audio"]["verified"])
 
 
 if __name__ == "__main__":

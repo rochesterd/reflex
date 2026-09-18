@@ -9,6 +9,7 @@ A session directory holds:
     <YYYY-MM-DD_HHMM>/
       instrument.mp4      # native resolution, variable frame rate
       third_person.mp4    # native resolution, variable frame rate
+      [audio.m4a]         # the microphone, if one is configured
       session.json        # the manifest below
       [<role>.mkv]        # only if that stream's MP4 failed verification
 
@@ -31,5 +32,10 @@ SESSION_FORMAT_VERSION = 2
 
 INSTRUMENT_STREAM = "instrument"
 THIRD_PERSON_STREAM = "third_person"
+# The microphone, as its own file on the same clock: audio.mka live,
+# audio.m4a once remuxed and verified. Absent from sessions recorded
+# before audio existed and from any machine with no `audio` section --
+# every reader treats a missing audio stream as "silent", never as broken.
+AUDIO_STREAM = "audio"
 
 MANIFEST_NAME = "session.json"

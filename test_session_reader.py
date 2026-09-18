@@ -13,6 +13,7 @@ import time
 import unittest
 from pathlib import Path
 
+from audio_capture import SyntheticAudio
 from recorder import Recorder
 from session_format import INSTRUMENT_STREAM, THIRD_PERSON_STREAM
 from session_reader import Session, SessionError, SessionPlayer
@@ -193,6 +194,51 @@ class SessionPlayerTest(unittest.TestCase):
         player = SessionPlayer(Session.load(d))
         player.close()
         player.close()
+
+
+
+class AudioStreamTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _record_with_audio(self) -> Path:
+        instrument = SyntheticCamera(160, 120, name="instrument", fps=30)
+        third = SyntheticCamera(160, 120, name="third", fps=30)
+        mic = SyntheticAudio()
+        instrument.start()
+        third.start()
+        mic.start()
+        try:
+            recorder = Recorder(
+                instrument, third, instrument_key="slit_lamp",
+                output_root=self._tmp.name, fps=30, preset="ultrafast", audio=mic,
+            )
+            recorder.start()
+            time.sleep(1.0)
+            recorder.stop()
+        finally:
+            instrument.stop()
+            third.stop()
+            mic.stop()
+        return recorder.session_dir
+
+    def test_a_silent_session_has_no_audio(self):
+        session = Session.load(record_session(self._tmp.name, 1))
+        self.assertIsNone(session.audio)
+        self.assertEqual(set(session.video_streams), {INSTRUMENT_STREAM, THIRD_PERSON_STREAM})
+
+    def test_an_audio_stream_is_read_as_audio_and_kept_out_of_the_player(self):
+        session = Session.load(self._record_with_audio())
+        self.assertIsNotNone(session.audio)
+        self.assertEqual(session.audio.kind, "audio")
+        self.assertEqual(session.audio.samplerate, 48000)
+        self.assertEqual(session.audio.channels, 1)
+        self.assertEqual(set(session.video_streams), {INSTRUMENT_STREAM, THIRD_PERSON_STREAM})
+        # The player is a video player: it must not try to decode the M4A
+        # as video, and images() must still be exactly the two panes.
+        with SessionPlayer(session) as player:
+            self.assertEqual(set(player.images()), {INSTRUMENT_STREAM, THIRD_PERSON_STREAM})
 
 
 if __name__ == "__main__":

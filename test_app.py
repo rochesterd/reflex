@@ -23,10 +23,14 @@ import app
 import neco_reflex_theme as theme
 from app import KioskWindow
 from camera import ORIENTATION_NONE, ORIENTATION_ROTATE_180, BaseCamera
-from config import ConfigError, InstrumentConfig
+from config import ConfigError, InstrumentConfig, StreamingConfig
 from device_presets import CUSTOM_PROFILE_ID
 from kiosk import State
+import numpy as np
+
+from audio_capture import AudioCapture, SyntheticAudio
 from synthetic_camera import SyntheticCamera
+from virtual_camera import VirtualCameraUnavailable
 
 _qt_app = QApplication.instance() or QApplication([])
 
@@ -752,6 +756,162 @@ class TestLabelsAndTimeLimit(unittest.TestCase):
                     window.controller.stop_recording()
                 third_person.stop()
                 instrument.stop()
+
+
+class _FakeBackend:
+    """Stands in for the virtual camera driver."""
+
+    instances: list = []
+
+    def __init__(self, fail: bool = False):
+        self.fail = fail
+        self.opened = None
+        self.frames = 0
+        self.closed = False
+        _FakeBackend.instances.append(self)
+
+    def open(self, width, height, fps):
+        if self.fail:
+            raise VirtualCameraUnavailable("no driver here")
+        self.opened = (width, height, fps)
+        return "Fake Virtual Camera"
+
+    def send(self, bgr):
+        self.frames += 1
+
+    def close(self):
+        self.closed = True
+
+
+class TestStreamMode(unittest.TestCase):
+    """Stream mode: no Start/Stop, the feed runs for the app's lifetime,
+    and what the kiosk knows about camera health reaches the picture as
+    a slate rather than only the status line."""
+
+    def setUp(self):
+        _FakeBackend.instances.clear()
+        self.third_person = SyntheticCamera(160, 120, fps=30)
+        self.instruments = {"slit_lamp": SyntheticCamera(320, 240, fps=30)}
+        self.addCleanup(self.third_person.stop)
+        self.addCleanup(self.instruments["slit_lamp"].stop)
+
+    def _window(self, fail_driver: bool = False) -> KioskWindow:
+        window = KioskWindow(
+            self.third_person,
+            self.instruments,
+            streaming=StreamingConfig(enabled=True, layout="side_by_side", width=640, height=240),
+            virtual_camera_backend_factory=lambda: _FakeBackend(fail=fail_driver),
+        )
+        _quiesce(window)
+        self.addCleanup(lambda: window._sink and window._sink.stop())
+        return window
+
+    def test_record_mode_starts_no_sink(self):
+        window = KioskWindow(self.third_person, self.instruments, virtual_camera_backend_factory=_FakeBackend)
+        _quiesce(window)
+        self.assertIsNone(window._sink)
+        self.assertEqual(_FakeBackend.instances, [])
+        self.assertFalse(window.start_button.isHidden())
+
+    def test_stream_mode_hides_start_and_stop_and_opens_the_feed(self):
+        window = self._window()
+        window._sync_ui(window.controller.poll_preflight())
+        self.assertTrue(window.start_button.isHidden())
+        self.assertTrue(window.stop_button.isHidden())
+        self.assertIsNotNone(window._sink)
+        self.assertEqual(_FakeBackend.instances[0].opened, (640, 240, 30))
+        self.assertTrue(window._sink.running)
+
+    def test_status_prompts_for_an_instrument_then_names_the_camera(self):
+        window = self._window()
+        window._sync_ui(window.controller.poll_preflight())
+        self.assertIn("Select an instrument", window.status_label.text())
+
+        window._on_instrument_clicked("slit_lamp")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and self.instruments["slit_lamp"].get_latest() is None:
+            time.sleep(0.01)
+        window._poll_tick()
+        self.assertIn("Fake Virtual Camera", window.status_label.text())
+        self.assertIn("Panopto Capture", window.status_label.text())
+
+    def test_a_frozen_camera_reaches_the_feed_as_a_slate(self):
+        window = self._window()
+        window._on_instrument_clicked("slit_lamp")
+        # Both cameras delivering, so the only fault left is the one we inject.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and (
+            self.third_person.get_latest() is None or self.instruments["slit_lamp"].get_latest() is None
+        ):
+            time.sleep(0.01)
+        from kiosk import PreflightStatus
+
+        frozen = PreflightStatus(
+            cameras_ready=True, disk_ok=True, free_bytes=1, required_bytes=0, frozen_cameras=("instrument",)
+        )
+        faults = window._stream_faults(frozen)
+        self.assertIn("instrument", faults)
+        self.assertIn("frozen", faults["instrument"])
+        with patch.object(window.controller, "poll_preflight", return_value=frozen):
+            window._poll_tick()
+        self.assertEqual(set(window._sink._faults), {"instrument"})
+        self.assertIn("red panel", window.status_label.text())
+
+    def test_a_missing_driver_is_loud_and_the_app_still_runs(self):
+        window = self._window(fail_driver=True)
+        self.assertIsNone(window._sink)
+        window._sync_ui(window.controller.poll_preflight())
+        self.assertIn("not available", window.status_label.text())
+        self.assertIn("no driver here", window.status_label.text())
+
+    def test_closing_stops_the_feed_and_never_asks_about_exports(self):
+        window = self._window()
+        backend = _FakeBackend.instances[0]
+        with patch.object(window, "_confirm_discard_unexported") as ask:
+            window.closeEvent(QCloseEvent())
+        ask.assert_not_called()
+        self.assertTrue(backend.closed)
+        self.assertFalse(window._sink.running)
+
+    def test_the_poll_never_opens_the_viewer(self):
+        window = self._window()
+        with patch.object(window, "_review_last_session") as review:
+            window._poll_tick()
+        review.assert_not_called()
+
+
+class TestMicrophoneInTheKiosk(unittest.TestCase):
+    def setUp(self):
+        self.third_person = SyntheticCamera(160, 120, fps=30)
+        self.instruments = {"slit_lamp": SyntheticCamera(160, 120, fps=30)}
+        self.addCleanup(self.third_person.stop)
+        self.addCleanup(self.instruments["slit_lamp"].stop)
+
+    def test_a_waiting_microphone_is_named_in_the_status_line(self):
+        mic = AudioCapture(device=None)
+        window = KioskWindow(self.third_person, self.instruments, audio=mic)
+        _quiesce(window)
+        window._on_instrument_clicked("slit_lamp")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and (
+            self.third_person.get_latest() is None or self.instruments["slit_lamp"].get_latest() is None
+        ):
+            time.sleep(0.01)
+        status = window.controller.poll_preflight()
+        self.assertFalse(status.cameras_ready)
+        self.assertIn("microphone", window._idle_reason(status).lower())
+
+        mic.push(np.zeros((960, 1), dtype=np.int16))
+        status = window.controller.poll_preflight()
+        self.assertTrue(status.cameras_ready)
+
+    def test_closing_stops_the_microphone(self):
+        mic = SyntheticAudio()
+        mic.start()
+        window = KioskWindow(self.third_person, self.instruments, audio=mic)
+        _quiesce(window)
+        window.closeEvent(QCloseEvent())
+        self.assertFalse(mic.running)
 
 
 class TestMissingConfigStartup(unittest.TestCase):

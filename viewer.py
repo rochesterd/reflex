@@ -41,6 +41,7 @@ from qt_image import bgr_to_pixmap
 import reflex_style
 from session_buffer import default_export_dir, removable_drives_detailed
 from session_export import ExportCancelled, default_export_name, export_session
+from audio_playback import AudioPlayer
 from session_reader import Session, SessionError, SessionPlayer
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,20 @@ _EXPORT_JOIN_TIMEOUT_S = 10.0
 def _mmss(seconds: float) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60:d}:{seconds % 60:02d}"
+
+
+def _default_panopto_session(panopto):
+    """A real login and client for config.PanoptoConfig. Imported here so
+    viewer.py stays importable, and testable, with no Panopto at all."""
+    from panopto_api import PanoptoClient, UserLogin
+
+    login = UserLogin(
+        panopto.host,
+        panopto.client_id,
+        panopto.client_secret,
+        redirect_port=panopto.redirect_port,
+    )
+    return login, PanoptoClient(panopto.host, login)
 
 
 class _ExportWorker(QObject):
@@ -99,6 +114,64 @@ class _ExportWorker(QObject):
             self.done.emit(str(path))
 
 
+class _PanoptoWorker(QObject):
+    """Signs the student in, uploads, and signs them out, on a plain thread.
+
+    Same shape as _ExportWorker so the progress dialog and outcome handling
+    read the same. The sign-out is in a `finally`: whatever happened, the
+    token must not outlive this run on a shared machine.
+    """
+
+    progress = Signal(int, int)
+    stage = Signal(str)
+    done = Signal(str)
+    failed = Signal(str)
+    sign_in_failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, session: Session, login, client, folder_id: str):
+        super().__init__()
+        self._session = session
+        self._login = login
+        self._client = client
+        self._folder_id = folder_id
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        from panopto_api import LoginCancelled, PanoptoAuthError, PanoptoError
+        from panopto_upload import UploadCancelled, upload_session
+
+        try:
+            self.stage.emit("Sign in using the browser window that just opened...")
+            self._login.sign_in(cancel_cb=self._cancel.is_set)
+            self.stage.emit("Sending to Panopto...")
+            url = upload_session(
+                self._session,
+                self._client,
+                self._folder_id,
+                progress_cb=self.progress.emit,
+                cancel_cb=self._cancel.is_set,
+            )
+        except (LoginCancelled, UploadCancelled):
+            self.cancelled.emit()
+        except PanoptoAuthError as exc:
+            logger.warning("Panopto sign-in problem: %s", exc)
+            self.sign_in_failed.emit(str(exc))
+        except PanoptoError as exc:
+            logger.warning("Panopto upload failed: %s", exc)
+            self.failed.emit(str(exc))
+        except Exception as exc:  # a missing boto3, a read error mid-transfer
+            logger.exception("Panopto upload failed")
+            self.failed.emit(str(exc))
+        else:
+            self.done.emit(url)
+        finally:
+            self._login.sign_out()
+
+
 class ViewerDialog(QDialog):
     """Playback window for one session.
 
@@ -111,12 +184,26 @@ class ViewerDialog(QDialog):
     "settings.py Preview leaked the IDS device" entry is about.
     """
 
-    def __init__(self, session: Session, parent=None, on_export=None, confirm_close=None):
+    def __init__(
+        self,
+        session: Session,
+        parent=None,
+        on_export=None,
+        confirm_close=None,
+        panopto=None,
+        panopto_session_factory=_default_panopto_session,
+    ):
         super().__init__(parent)
         self.session = session
-        # Called with the written path when an export finishes. The kiosk
-        # uses it to tell an exported session from one its buffer is about
-        # to delete (see app.py).
+        # config.PanoptoConfig, or None on a machine that doesn't upload --
+        # the normal state, in which the button simply isn't there. The
+        # factory is injectable so tests can hand in a login and client
+        # backed by an in-memory Panopto.
+        self._panopto = panopto
+        self._panopto_session_factory = panopto_session_factory
+        # Called with the written path -- or, for Panopto, the viewer URL --
+        # when an export finishes. The kiosk uses it to tell an exported
+        # session from one its buffer is about to delete (see app.py).
         self._on_export = on_export
         # Called with this dialog when something tries to close it; return
         # False to keep it open. The kiosk uses it to ask about saving
@@ -128,6 +215,16 @@ class ViewerDialog(QDialog):
         self.setSizeGripEnabled(True)
 
         self.player = SessionPlayer(session)
+        # The microphone track, following the video clock: play/pause/seek
+        # below drive it. None for a silent session, and also when the
+        # speaker can't be opened -- a review without sound beats no review.
+        self.audio: AudioPlayer | None = None
+        if session.audio is not None:
+            try:
+                self.audio = AudioPlayer(session.audio.path, session.audio.offset_s)
+            except Exception as exc:  # noqa: BLE001 -- no output device, a bad file
+                logger.warning("audio playback unavailable: %s", exc)
+                self.audio = None
         self._playing = False
         self._play_started_wall = 0.0
         self._play_started_media = 0.0
@@ -161,6 +258,12 @@ class ViewerDialog(QDialog):
         self.export_button.setToolTip("Save the current view as a single video file")
         self.export_button.clicked.connect(self._on_export_clicked)
 
+        self.panopto_button = QPushButton("Send to Panopto...")
+        self.panopto_button.setMinimumHeight(40)
+        self.panopto_button.setToolTip("Sign in and upload both views to your course folder")
+        self.panopto_button.clicked.connect(self._on_panopto_clicked)
+        self.panopto_button.setVisible(self._panopto is not None)
+
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, SLIDER_STEPS)
         self.slider.sliderPressed.connect(self._on_scrub_start)
@@ -182,6 +285,7 @@ class ViewerDialog(QDialog):
         controls.addWidget(QLabel("View:"))
         controls.addWidget(self.layout_box)
         controls.addWidget(self.export_button)
+        controls.addWidget(self.panopto_button)
 
         layout = QVBoxLayout()
         layout.addWidget(self.video_label, stretch=1)
@@ -207,6 +311,8 @@ class ViewerDialog(QDialog):
             # Say the pane is absent rather than let it render as black and
             # look like a bug in playback.
             parts.append(f"{role}: no video recorded")
+        if self.session.audio is not None:
+            parts.append("with sound" if self.audio is not None else "sound recorded, but no speaker")
         return "   |   ".join(parts)
 
     # --- playback -------------------------------------------------------------
@@ -214,6 +320,8 @@ class ViewerDialog(QDialog):
     def _toggle_play(self) -> None:
         if not self._playing and self.player.position >= self.player.duration:
             self.player.seek(0.0)  # replay from the top rather than sitting at the end
+            if self.audio is not None:
+                self.audio.seek(0.0)
         self._set_playing(not self._playing)
 
     def _set_playing(self, playing: bool) -> None:
@@ -222,6 +330,10 @@ class ViewerDialog(QDialog):
         if playing:
             self._play_started_wall = time.monotonic()
             self._play_started_media = self.player.position
+            if self.audio is not None:
+                self.audio.play(self.player.position)
+        elif self.audio is not None:
+            self.audio.pause()
         self._dirty = True
 
     def _tick(self) -> None:
@@ -259,6 +371,8 @@ class ViewerDialog(QDialog):
 
     def _on_scrub_move(self, value: int) -> None:
         self.player.seek(self.player.duration * (value / SLIDER_STEPS))
+        if self.audio is not None:
+            self.audio.seek(self.player.position)
         self.time_label.setText(f"{_mmss(self.player.position)} / {_mmss(self.player.duration)}")
         self._dirty = True
 
@@ -385,6 +499,107 @@ class ViewerDialog(QDialog):
                 f"Check whether {out_path.name} appears in {out_path.parent}.",
             )
 
+    # --- Panopto ------------------------------------------------------------
+
+    def _on_panopto_clicked(self) -> None:
+        if self._panopto is None:
+            return
+        self._run_panopto_upload()
+
+    def _run_panopto_upload(self) -> None:
+        """Sign in, upload, sign out, behind one cancellable progress dialog.
+
+        Failure is loud and in-session: a warning naming what failed and a
+        Retry, with the recording still in the buffer and still unexported,
+        so closing the viewer keeps asking. Nothing is queued and nothing
+        survives the app exiting -- the decided behaviour (ROADMAP.md
+        2026-09-18), not an oversight.
+        """
+        self._set_playing(False)
+
+        progress = QProgressDialog("Connecting to Panopto...", "Cancel", 0, 100, self)
+        progress.setWindowTitle("Send to Panopto")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        login, client = self._panopto_session_factory(self._panopto)
+        worker = _PanoptoWorker(self.session, login, client, self._panopto.assignment_folder_id)
+        outcome: dict[str, str] = {}
+
+        def settle(kind: str, payload: str = "") -> None:
+            outcome["kind"] = kind
+            outcome["payload"] = payload
+            progress.reset()
+            progress.close()
+
+        worker.stage.connect(progress.setLabelText)
+        worker.progress.connect(lambda done, total: self._on_upload_progress(progress, done, total))
+        worker.done.connect(lambda url: settle("done", url))
+        worker.failed.connect(lambda message: settle("failed", message))
+        worker.sign_in_failed.connect(lambda message: settle("sign_in_failed", message))
+        worker.cancelled.connect(lambda: settle("cancelled"))
+        progress.canceled.connect(worker.cancel)
+
+        thread = threading.Thread(target=worker.run, daemon=True, name="panopto")
+        thread.start()
+        progress.exec()
+
+        if not outcome:
+            worker.cancel()
+        thread.join(timeout=_EXPORT_JOIN_TIMEOUT_S)
+        QApplication.processEvents()
+
+        self._report_panopto(outcome)
+
+    @staticmethod
+    def _on_upload_progress(progress: QProgressDialog, done: int, total: int) -> None:
+        progress.setMaximum(total)
+        progress.setValue(done)
+        progress.setLabelText(f"Sending to Panopto...  {done // 1_000_000} / {total // 1_000_000} MB")
+
+    def _report_panopto(self, outcome: dict[str, str]) -> None:
+        kind = outcome.get("kind")
+        if kind == "done":
+            if self._on_export is not None:
+                self._on_export(outcome["payload"])
+            QMessageBox.information(
+                self,
+                "Sent to Panopto",
+                "Your recording is on its way. It will appear in your course folder "
+                "once Panopto has finished processing it.",
+            )
+        elif kind == "sign_in_failed":
+            self._offer_retry("Couldn't sign in", outcome["payload"])
+        elif kind == "failed":
+            self._offer_retry("Upload failed", outcome["payload"])
+        elif kind == "cancelled":
+            self.status_label.setText(f"Upload cancelled.   |   {self._describe_session()}")
+        else:
+            logger.warning("Panopto upload did not report an outcome in time")
+            QMessageBox.warning(
+                self,
+                "Upload unfinished",
+                "The upload is taking longer than expected. Your recording is still "
+                "here -- try again, or save it to a drive.",
+            )
+
+    def _offer_retry(self, title: str, detail: str) -> None:
+        """Say what went wrong and let the student go again. The recording
+        is not touched either way: a student who gives up still has the
+        drive export, and closing still asks."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(f"{detail}\n\nYour recording is still here.")
+        retry = box.addButton("Try again", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Not now", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(retry)
+        box.exec()
+        if box.clickedButton() is retry:
+            self._run_panopto_upload()
+
     # --- rendering ------------------------------------------------------------
 
     def _canvas_size(self) -> tuple[int, int]:
@@ -404,6 +619,10 @@ class ViewerDialog(QDialog):
     def _shutdown(self, *_args) -> None:
         """Stop the timer and release the decoders. Idempotent -- reached
         from both `finished` and closeEvent."""
+        audio = getattr(self, "audio", None)
+        if audio is not None:
+            audio.close()
+            self.audio = None
         timer = getattr(self, "timer", None)
         if timer is not None:
             timer.stop()
@@ -460,7 +679,7 @@ def _release(dialog: QDialog) -> None:
 
 
 def open_session(
-    session_dir: Path | str, parent=None, on_export=None, confirm_close=None
+    session_dir: Path | str, parent=None, on_export=None, confirm_close=None, panopto=None
 ) -> bool:
     """Load and show a session modally, reporting a bad session with a
     dialog rather than a traceback. True if it opened.
@@ -478,7 +697,7 @@ def open_session(
         logger.warning("could not open session %s: %s", session_dir, exc)
         return False
     dialog = ViewerDialog(
-        session, parent=parent, on_export=on_export, confirm_close=confirm_close
+        session, parent=parent, on_export=on_export, confirm_close=confirm_close, panopto=panopto
     )
     dialog.resize(*DEFAULT_CANVAS)
     try:

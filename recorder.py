@@ -31,9 +31,12 @@ from pathlib import Path
 
 import av
 import cv2
+import numpy as np
 
 from camera import BaseCamera, Frame
+from audio_capture import AudioCapture
 from session_format import (
+    AUDIO_STREAM,
     INSTRUMENT_STREAM,
     MANIFEST_NAME,
     SESSION_FORMAT_VERSION,
@@ -437,9 +440,257 @@ class _StreamWriter:
         return data
 
 
+_AUDIO_CODEC = "aac"
+# Silence is inserted when a block arrives later than its sample count
+# predicts by more than this: an overflow lost samples, and the timeline
+# must stay honest even if the audio has a hole in it.
+_AUDIO_GAP_TOLERANCE_S = 0.040
+_AUDIO_VERIFY_DECODE_FRAMES = 4
+
+
+def _m4a_verifies(m4a_path: Path, expected_samples: int, samplerate: int) -> bool:
+    """The audio counterpart of _mp4_verifies: the first packets decode,
+    and the file carries about as much audio as was encoded."""
+    if expected_samples == 0:
+        return False
+    try:
+        with av.open(str(m4a_path)) as container:
+            stream = container.streams.audio[0]
+            packets = sum(1 for packet in container.demux(stream) if packet.size)
+        with av.open(str(m4a_path)) as container:
+            stream = container.streams.audio[0]
+            decoded = sum(1 for _ in islice(container.decode(stream), _AUDIO_VERIFY_DECODE_FRAMES))
+    except Exception as exc:
+        logger.error("%s: verification errored: %s", m4a_path.name, exc)
+        return False
+    if decoded == 0:
+        logger.error("%s: decoded 0 audio frames", m4a_path.name)
+        return False
+    # AAC packs 1024 samples a packet; allow the encoder's priming/flush slack.
+    expected_packets = expected_samples // 1024
+    if packets < expected_packets - 4:
+        logger.error("%s: has %d audio packets, expected ~%d", m4a_path.name, packets, expected_packets)
+        return False
+    return True
+
+
+def _remux_audio_to_m4a(mka_path: Path, m4a_path: Path) -> None:
+    input_ = av.open(str(mka_path))
+    output = av.open(str(m4a_path), mode="w")
+    try:
+        in_stream = input_.streams.audio[0]
+        out_stream = output.add_stream_from_template(in_stream)
+        for packet in input_.demux(in_stream):
+            if packet.size == 0:
+                continue
+            packet.stream = out_stream
+            output.mux(packet)
+    finally:
+        output.close()
+        input_.close()
+
+
+class _AudioWriter:
+    """The microphone -> one AAC file, on its own thread, on the shared clock.
+
+    Mirrors _StreamWriter: MKA written live and interruption-safe, remuxed
+    to M4A, verified, MKA deleted. Every sample's position is derived from
+    its block's monotonic timestamp against the session origin, exactly as
+    a video frame's PTS is -- so audio and video line up by construction,
+    not by a measured offset. Time base 1/samplerate; PTS is the sample
+    index on the session clock.
+    """
+
+    def __init__(self, capture: AudioCapture, session_dir: Path, origin_monotonic: float):
+        self.role = AUDIO_STREAM
+        self.capture = capture
+        self.label = "microphone"
+        self.mka_path = session_dir / f"{AUDIO_STREAM}.mka"
+        self.m4a_path = session_dir / f"{AUDIO_STREAM}.m4a"
+        self._origin = origin_monotonic
+        self.samplerate = capture.samplerate
+        self.channels = capture.channels
+        self.samples_written = 0
+        self.silence_inserted = 0  # samples of silence filling gaps
+        self.dropped_blocks = 0  # gaps in AudioBlock.index
+        self.first_timestamp: float | None = None
+        self.verified = False
+        self._error: str | None = None
+        self._last_index: int | None = None
+        self._next_pts = 0  # sample index of the next sample to write
+        self._container = None
+        self._stream = None
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+    # -- lifecycle --------------------------------------------------------
+
+    def start(self) -> None:
+        self._container = av.open(str(self.mka_path), mode="w")
+        self._stream = self._container.add_stream(_AUDIO_CODEC, rate=self.samplerate)
+        self._stream.codec_context.format = "fltp"  # what libavcodec's aac takes
+        layout = "mono" if self.channels == 1 else "stereo"
+        self._stream.codec_context.layout = layout
+        self._stream.time_base = Fraction(1, self.samplerate)
+        self._stream.codec_context.time_base = Fraction(1, self.samplerate)
+        # Discard what queued before the origin, as the video writers do.
+        while self.capture.read(timeout=0) is not None:
+            pass
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="writer-audio")
+        self._thread.start()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def abandon(self) -> None:
+        if self._container is not None:
+            try:
+                self._container.close()
+            except Exception as exc:
+                logger.warning("audio: closing an abandoned container failed: %s", exc)
+            self._container = None
+
+    def join(self, timeout: float) -> bool:
+        if self._thread is None:
+            return True
+        self._thread.join(timeout=timeout)
+        return not self._thread.is_alive()
+
+    def finalize(self) -> None:
+        self._thread = None
+        try:
+            for packet in self._stream.encode(None):
+                self._container.mux(packet)
+        except Exception as exc:
+            logger.error("%s: flushing the encoder failed: %s", self.mka_path.name, exc)
+            if self._error is None:
+                self._error = f"encoder flush failed: {exc}"
+        finally:
+            try:
+                self._container.close()
+            except Exception as exc:
+                logger.error("%s: closing the container failed: %s", self.mka_path.name, exc)
+
+        if not self.mka_path.exists():
+            self.verified = False
+            if self._error is None:
+                self._error = "no audio was captured"
+            logger.error("audio: nothing captured; no file written")
+            return
+        try:
+            _remux_audio_to_m4a(self.mka_path, self.m4a_path)
+        except Exception as exc:
+            logger.error("%s: remux failed: %s", self.m4a_path.name, exc)
+            self.verified = False
+            if self._error is None:
+                self._error = f"remux to M4A failed: {exc}"
+            return
+        if self._error is not None:
+            self.verified = False
+            logger.error("audio: writer failed mid-recording (%s); keeping %s", self._error, self.mka_path.name)
+            return
+        if _m4a_verifies(self.m4a_path, self.samples_written, self.samplerate):
+            self.verified = True
+            self.mka_path.unlink()
+            logger.info("%s: verified (%.1fs); removed interim %s", self.m4a_path.name, self.duration_s, self.mka_path.name)
+        else:
+            self.verified = False
+            logger.error("%s: did not verify; keeping %s", self.m4a_path.name, self.mka_path.name)
+
+    # -- capture thread ---------------------------------------------------
+
+    def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                block = self.capture.read(timeout=_READ_TIMEOUT_S)
+                if block is not None:
+                    self._absorb(block)
+            for _ in range(_STOP_DRAIN_MAX_FRAMES):
+                block = self.capture.read(timeout=0)
+                if block is None:
+                    break
+                self._absorb(block)
+        except Exception as exc:
+            logger.exception("audio: writer loop failed after %d samples", self.samples_written)
+            self._error = f"{type(exc).__name__}: {exc}"
+
+    def _absorb(self, block) -> None:
+        if self._last_index is not None and block.index > self._last_index + 1:
+            self.dropped_blocks += block.index - self._last_index - 1
+        self._last_index = block.index
+
+        # Where this block's *first* sample belongs on the session clock.
+        block_start_s = (block.timestamp - self._origin) - block.frames / self.samplerate
+        if self.first_timestamp is None:
+            self.first_timestamp = block.timestamp
+            self._next_pts = max(0, int(round(block_start_s * self.samplerate)))
+        else:
+            expected_s = self._next_pts / self.samplerate
+            behind_s = block_start_s - expected_s
+            if behind_s > _AUDIO_GAP_TOLERANCE_S:
+                # Samples went missing (an overflow, a stalled callback).
+                # Fill with silence so what follows lands where it belongs.
+                gap = int(round(behind_s * self.samplerate))
+                self._encode(np.zeros((gap, self.channels), dtype=np.int16))
+                self.silence_inserted += gap
+        self._encode(block.samples)
+
+    def _encode(self, samples: np.ndarray) -> None:
+        if samples.shape[0] == 0:
+            return
+        # PyAV wants (channels, samples) for packed->planar conversion.
+        frame = av.AudioFrame.from_ndarray(
+            np.ascontiguousarray(samples.T), format="s16", layout="mono" if self.channels == 1 else "stereo"
+        )
+        frame.sample_rate = self.samplerate
+        frame.pts = self._next_pts
+        frame.time_base = Fraction(1, self.samplerate)
+        for packet in self._stream.encode(frame):
+            self._container.mux(packet)
+        self._next_pts += samples.shape[0]
+        self.samples_written += samples.shape[0]
+
+    # -- manifest ---------------------------------------------------------
+
+    @property
+    def duration_s(self) -> float:
+        return max(0.0, self._next_pts / self.samplerate)
+
+    def info(self) -> dict:
+        mka_exists = self.mka_path.exists()
+        if self.m4a_path.exists():
+            playable: str | None = self.m4a_path.name
+        elif mka_exists:
+            playable = self.mka_path.name
+        else:
+            playable = None
+        data = {
+            "file": playable,
+            "kind": "audio",
+            "label": self.label,
+            "samplerate": self.samplerate,
+            "channels": self.channels,
+            "duration_s": round(self.duration_s, 3),
+            "samples": self.samples_written,
+            "silence_inserted_samples": self.silence_inserted,
+            "dropped_blocks": self.dropped_blocks,
+            "overflows": self.capture.overflows,
+            "first_timestamp": self.first_timestamp,
+            "offset_s": 0.0,
+            "verified": self.verified,
+        }
+        if self._error is not None:
+            data["error"] = self._error
+        if not self.verified and mka_exists and self.mka_path.name != playable:
+            data["mka"] = self.mka_path.name
+        return data
+
+
 class Recorder:
     """Records the selected instrument camera and the third-person camera
-    as two synchronized VFR files in a fresh session directory."""
+    as two synchronized VFR files -- and the microphone, if one is given,
+    as a third file on the same clock -- in a fresh session directory."""
 
     def __init__(
         self,
@@ -453,8 +704,13 @@ class Recorder:
         codec: str = "libx264",
         crf: int = 23,
         preset: str = "ultrafast",
+        audio: AudioCapture | None = None,
     ):
         self.instrument_camera = instrument_camera
+        # None means a silent session, which every session before audio
+        # existed is. The capture is started and owned by whoever made it
+        # (kiosk.py), the way the third-person camera is.
+        self.audio = audio
         self.third_person_camera = third_person_camera
         self.instrument_key = instrument_key
         self.instrument_label = instrument_label or instrument_key
@@ -466,7 +722,7 @@ class Recorder:
         self.preset = preset
 
         self.session_dir: Path | None = None
-        self._writers: list[_StreamWriter] = []
+        self._writers: list = []  # _StreamWriter and, if configured, one _AudioWriter
         self._start_wall: datetime | None = None
         self._origin_monotonic: float | None = None
 
@@ -485,7 +741,9 @@ class Recorder:
                 self._origin_monotonic, self.fps, self.codec, self.crf, self.preset,
             ),
         ]
-        started: list[_StreamWriter] = []
+        if self.audio is not None:
+            self._writers.append(_AudioWriter(self.audio, self.session_dir, self._origin_monotonic))
+        started: list = []
         try:
             for writer in self._writers:
                 writer.start()
@@ -570,6 +828,8 @@ class Recorder:
             # in different files were grabbed at the same instant.
             "clock": {"origin_monotonic": self._origin_monotonic},
             "fps": self.fps,
-            "duration_s": round(max((w.duration_s for w in self._writers), default=0.0), 3),
+            "duration_s": round(
+                max((w.duration_s for w in self._writers if isinstance(w, _StreamWriter)), default=0.0), 3
+            ),
             "streams": {writer.role: writer.info() for writer in self._writers},
         }

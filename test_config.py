@@ -12,10 +12,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from secret_store import write_secret
+
 from config import (
-    ACCESS_MODEL_COHORT,
-    ACCESS_MODEL_PER_STUDENT,
+    DEFAULT_PANOPTO_REDIRECT_PORT,
+    DEFAULT_STREAM_LAYOUT,
+    STREAM_LAYOUTS,
     ConfigError,
+    panopto_secret_path,
     achievable_fps,
     exposure_fps_warnings,
     load_config,
@@ -531,7 +535,7 @@ class RecordingFpsTest(unittest.TestCase):
                     load_config(self.path)
 
 class PanoptoConfigTest(unittest.TestCase):
-    """The upload credentials. Optional, because most machines have none --
+    """The Panopto section. Optional, because most machines have none --
     but present-and-broken must fail at load, not at the moment a student
     has just finished recording something they cannot record again."""
 
@@ -543,28 +547,53 @@ class PanoptoConfigTest(unittest.TestCase):
     def _write(self, data: dict) -> None:
         self.path.write_text(json.dumps(data), encoding="utf-8")
 
-    def _with_panopto(self, **overrides) -> dict:
+    def _with_panopto(self, secret: str | None = None, **overrides) -> dict:
         data = json.loads(json.dumps(VALID))
         section = {
             "host": "neco.hosted.panopto.com",
             "client_id": "abc",
-            "client_secret": "shh",
-            "parent_folder_id": "folder-1",
+            "assignment_folder_id": "folder-1",
         }
         section.update(overrides)
         data["panopto"] = section
+        if secret is not None:
+            write_secret(panopto_secret_path(self.path), secret)
         return data
 
     def test_absent_section_means_uploads_are_off_not_an_error(self):
         self._write(VALID)
         self.assertIsNone(load_config(self.path).panopto)
 
-    def test_a_complete_section_loads(self):
+    def test_a_complete_section_loads_without_any_secret(self):
+        # Loadable with no secret stored (the loader doesn't insist), and a
+        # student who signs in as themselves.
         self._write(self._with_panopto())
         panopto = load_config(self.path).panopto
         self.assertEqual(panopto.host, "neco.hosted.panopto.com")
-        self.assertEqual(panopto.parent_folder_id, "folder-1")
-        self.assertEqual(panopto.access_model, ACCESS_MODEL_COHORT)
+        self.assertEqual(panopto.client_id, "abc")
+        self.assertEqual(panopto.assignment_folder_id, "folder-1")
+        self.assertIsNone(panopto.client_secret)
+        self.assertEqual(panopto.redirect_port, DEFAULT_PANOPTO_REDIRECT_PORT)
+
+    def test_a_stored_secret_is_read_from_beside_the_config(self):
+        self._write(self._with_panopto(secret="s3cret"))
+        self.assertEqual(load_config(self.path).panopto.client_secret, "s3cret")
+
+    def test_the_secret_is_never_written_into_config_json(self):
+        self._write(self._with_panopto(secret="s3cret"))
+        load_config(self.path)
+        self.assertNotIn("s3cret", self.path.read_text(encoding="utf-8"))
+        self.assertNotIn("s3cret", panopto_secret_path(self.path).read_bytes().decode("latin-1"))
+
+    def test_a_plaintext_secret_in_config_json_is_refused(self):
+        # Accepting it would normalise a plaintext credential on a kiosk,
+        # even a low-value one.
+        data = self._with_panopto()
+        data["panopto"]["client_secret"] = "oops-in-the-clear"
+        self._write(data)
+        with self.assertRaises(ConfigError) as caught:
+            load_config(self.path)
+        self.assertIn("Settings", str(caught.exception))
 
     def test_a_pasted_site_url_is_reduced_to_its_hostname(self):
         for host in (
@@ -577,7 +606,7 @@ class PanoptoConfigTest(unittest.TestCase):
                 self.assertEqual(load_config(self.path).panopto.host, "neco.hosted.panopto.com")
 
     def test_a_half_filled_section_is_rejected_rather_than_ignored(self):
-        for field in ("host", "client_id", "client_secret", "parent_folder_id"):
+        for field in ("host", "client_id", "assignment_folder_id"):
             for bad in ("", "   ", None, 7):
                 with self.subTest(field=field, bad=bad):
                     self._write(self._with_panopto(**{field: bad}))
@@ -585,14 +614,21 @@ class PanoptoConfigTest(unittest.TestCase):
                         load_config(self.path)
                     self.assertIn(field, str(caught.exception))
 
-    def test_an_unknown_access_model_is_rejected(self):
-        self._write(self._with_panopto(access_model="whoever"))
-        with self.assertRaises(ConfigError):
-            load_config(self.path)
+    def test_the_redirect_port_can_be_overridden_but_must_be_sane(self):
+        self._write(self._with_panopto(redirect_port=50000))
+        self.assertEqual(load_config(self.path).panopto.redirect_port, 50000)
+        for bad in (80, 70000, "48219", True, 1.5):
+            with self.subTest(bad=bad):
+                self._write(self._with_panopto(redirect_port=bad))
+                with self.assertRaises(ConfigError):
+                    load_config(self.path)
 
-    def test_per_student_is_accepted(self):
-        self._write(self._with_panopto(access_model="per_student"))
-        self.assertEqual(load_config(self.path).panopto.access_model, ACCESS_MODEL_PER_STUDENT)
+    def test_the_default_port_matches_the_api_module(self):
+        # Two copies of one number, kept apart so config.py never imports
+        # panopto_api. This is the test that holds them together.
+        from panopto_api import DEFAULT_REDIRECT_PORT
+
+        self.assertEqual(DEFAULT_PANOPTO_REDIRECT_PORT, DEFAULT_REDIRECT_PORT)
 
     def test_the_section_must_be_an_object(self):
         data = json.loads(json.dumps(VALID))
@@ -600,6 +636,93 @@ class PanoptoConfigTest(unittest.TestCase):
         self._write(data)
         with self.assertRaises(ConfigError):
             load_config(self.path)
+
+
+
+class StreamingConfigTest(unittest.TestCase):
+    """Stream mode. Absent is record mode, which every existing config is;
+    present-and-wrong fails at load."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "config.json"
+
+    def _write(self, **streaming) -> None:
+        data = json.loads(json.dumps(VALID))
+        if streaming:
+            data["streaming"] = streaming
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_absent_is_record_mode(self):
+        self._write()
+        cfg = load_config(self.path)
+        self.assertFalse(cfg.streaming.enabled)
+        self.assertEqual(cfg.streaming.layout, DEFAULT_STREAM_LAYOUT)
+        self.assertEqual(cfg.streaming.size, (1920, 1080))
+
+    def test_enabled_with_a_layout_loads(self):
+        self._write(enabled=True, layout="picture_in_picture", fps=25, width=1280, height=720)
+        cfg = load_config(self.path)
+        self.assertTrue(cfg.streaming.enabled)
+        self.assertEqual(cfg.streaming.layout, "picture_in_picture")
+        self.assertEqual((cfg.streaming.fps, cfg.streaming.size), (25, (1280, 720)))
+
+    def test_bad_values_are_rejected(self):
+        for bad in (
+            {"enabled": "yes"},
+            {"enabled": True, "layout": "diagonal"},
+            {"enabled": True, "fps": 0},
+            {"enabled": True, "width": 1919},
+            {"enabled": True, "height": "1080"},
+        ):
+            with self.subTest(bad=bad):
+                self._write(**bad)
+                with self.assertRaises(ConfigError):
+                    load_config(self.path)
+
+    def test_the_layouts_match_the_compositor(self):
+        # Restated in config.py so it imports nothing; this holds them together.
+        from compositor import LAYOUT_MODES
+
+        self.assertEqual(tuple(STREAM_LAYOUTS), tuple(LAYOUT_MODES))
+
+
+
+class AudioConfigTest(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "config.json"
+
+    def _write(self, audio=None) -> None:
+        data = json.loads(json.dumps(VALID))
+        if audio is not None:
+            data["audio"] = audio
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_absent_is_a_silent_kiosk(self):
+        self._write()
+        self.assertIsNone(load_config(self.path).audio)
+
+    def test_an_empty_section_means_the_default_microphone(self):
+        self._write({})
+        audio = load_config(self.path).audio
+        self.assertIsNone(audio.device)
+        self.assertEqual((audio.samplerate, audio.channels), (48000, 1))
+
+    def test_a_named_device_is_kept_by_name(self):
+        self._write({"device": "Microphone Array (Intel)", "channels": 2})
+        audio = load_config(self.path).audio
+        self.assertEqual(audio.device, "Microphone Array (Intel)")
+        self.assertEqual(audio.channels, 2)
+
+    def test_bad_values_are_rejected(self):
+        for bad in ("mic", {"device": ""}, {"device": 3}, {"samplerate": 0}, {"channels": 3}):
+            with self.subTest(bad=bad):
+                self._write(bad)
+                with self.assertRaises(ConfigError):
+                    load_config(self.path)
 
 
 if __name__ == "__main__":

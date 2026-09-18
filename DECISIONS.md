@@ -5491,3 +5491,104 @@ Still provisional, as their own entries say: the curve and metering
 numbers were chosen on a focus rod, skin and a glossy box, not an eye.
 
 ---
+
+## 2026-09-18 — Panopto upload: the student uploads, into an assignment folder
+
+**Found:** the first design (2026-09-17, in ROADMAP at the time) had a
+service account uploading on students' behalf. Two things killed it. No
+local encryption can hide a secret from code running as the kiosk account
+-- DPAPI machine scope is decryptable by any process on the box, and the
+secret would have carried Creator rights over every recording in the
+cohort. And Panopto's own OAuth doc says a client-credentials token "would
+not be authorized for any API calls that require a user", which uploading
+does. It would not have worked without a stored refresh token, the one
+thing we least wanted on a kiosk.
+
+**Decision:** the student signs in as themselves and the upload runs as
+them, into a Panopto *Assignment Folder*, where each student sees only
+their own submissions and faculty see all. There is no service account.
+The kiosk holds nothing that grants access on its own: the API client is
+Panopto's "Server-side Web Application" type (its authorization-code
+client; *not* "User Based", which is the password grant), whose secret
+cannot mint a token without a live login. Panopto's OAuth has no per-
+operation scopes, so a token is as broad as its user -- and a student's
+own rights are the least any design on this API can hold.
+
+**How:** `panopto_api.UserLogin` -- authorization code + PKCE over a
+loopback redirect on `127.0.0.1:48219` (not "localhost": Windows resolves
+that to ::1 first and the fallback costs two seconds), the port bound
+exclusively so nothing else can take the code, the client secret sent as
+HTTP Basic per Panopto's doc, scope `openid api` with no `offline_access`
+-- a kiosk must never remember anyone. The sign-in runs in a throwaway
+Edge profile that is terminated and deleted on every exit path: a window
+left signed into Google is a worse leak than a Panopto login. The upload
+is `sessionUpload` → S3 target via boto3 → UCS manifest → `State: 1`,
+written from Panopto's published sample. In UCS, Primary is the *smaller*
+pane, so the third-person feed is Primary and the instrument fills the
+large one. `viewer.py`'s Send to Panopto signs in, uploads, signs out in
+a `finally`; failure gets Try again / Not now with the recording untouched.
+
+**Accepted:** the student owns the session and can delete it. Whether they
+can re-share it outward is a folder setting to confirm with IT.
+**Unverified:** nothing has run against a real site; `tools/panopto_probe.py`
+is the first thing to run when the client id arrives.
+
+---
+
+## 2026-09-18 — Stream mode: a virtual camera for Panopto Capture
+
+**Found:** IT asked for the cameras to be recorded by Panopto's own
+browser recorder rather than by Reflex. Panopto Capture records several
+cameras as separate streams, so only the instrument camera -- which no
+browser can see -- needs a virtual feed; the developer chose one composited
+side-by-side feed instead, and `virtual_camera.py` keeps that choice in
+one `compose_layout()` call so instrument-only is a config change later.
+
+**Decision:** a `streaming` section in config.json switches the kiosk to
+stream mode: no Start/Stop, no buffer, no viewer. `VirtualCameraSink`
+composes the live feeds at a fixed rate into the OBS Virtual Camera driver
+via pyvirtualcam, and the student records in Panopto Capture, signed in as
+themselves. Identity, filing and retention are Panopto's. Frames come from
+`get_latest()`, never `read()`: a virtual camera repeats a slow camera's
+frame and skips a fast one's, and neither is a drop.
+
+**Loud and early moves into the picture.** With no Start gate, a camera
+that stopped seeing would be recorded by Panopto as a frozen frame for an
+hour. So a role the kiosk's preflight reports absent or frozen is replaced
+in the feed by a red slate saying so -- never by its last good frame --
+and the status line says the same words. A missing driver fails at start,
+on screen, rather than falling back to recording.
+
+**Costs:** Panopto Capture encodes around 1080p, below the instrument
+cameras' native resolution; the detail loss is measurable and unmeasured.
+The driver is a packaging step (PACKAGING.md 2c) and is not on any dev
+machine, so `PyVirtualCamBackend` is exercised only where one exists.
+
+---
+
+## 2026-09-18 — Audio as a third stream on the shared clock
+
+**Decision:** the microphone is recorded as `audio.mka` → `audio.m4a`, a
+third file beside the two videos, not interleaved into `third_person.mp4`.
+Same philosophy as the split recorder: one source, one file, sync by PTS.
+Every block's samples are placed by its monotonic timestamp against
+`clock.origin_monotonic`, exactly as a video frame's PTS is, so audio and
+video line up by construction; a gap in the blocks is filled with silence
+so what follows lands where its timestamp says. Remux, verify and delete-
+the-interim mirror the video writers (`_AudioWriter`).
+
+**Consequences:** `session.json` carries the track with `kind: "audio"`;
+readers treat a missing one as silent, never broken -- every session
+before today is silent. `SessionPlayer` stays a video player; the viewer's
+`audio_playback.AudioPlayer` decodes the track to memory and follows the
+viewer's clock (play/pause/seek), free-running between seeks because a
+per-tick correction would be audible and the drift is not. Export
+stream-copies the AAC. The UCS manifest lists it as `Type: Audio`. A
+configured microphone that hasn't delivered gates Start like a camera:
+silence is what a student can't see. Stream mode's audio is the
+browser's microphone; Reflex does nothing.
+
+**Not gated:** loudness. A quiet room is legitimate; settings.py's Test
+microphone is where a technician tells a working mic from a muted one.
+
+---

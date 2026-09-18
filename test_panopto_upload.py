@@ -16,60 +16,69 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from dataclasses import replace
 from pathlib import Path
 
-from panopto_api import PanoptoClient, UploadTarget
+from panopto_api import (
+    MANIFEST_FILENAME,
+    UPLOAD_STATE_COMPLETE,
+    PanoptoClient,
+    UploadAborted,
+)
 from panopto_upload import (
+    UCS_NAMESPACE,
     UploadCancelled,
     build_manifest,
+    build_ucs_manifest,
     default_title,
     upload_session,
 )
-from session_format import INSTRUMENT_STREAM, THIRD_PERSON_STREAM
+from session_format import AUDIO_STREAM, INSTRUMENT_STREAM, THIRD_PERSON_STREAM
 from session_reader import Session
-from test_panopto_api import HOST, FakePanoptoSite, make_client
+from test_panopto_api import HOST, FakePanoptoSite, make_login
 from test_session_reader import record_session
 
 CHUNK = 64 * 1024
 
 
 class InMemoryUploadClient(PanoptoClient):
-    """Fills in the three seam methods panopto_api leaves unverified.
+    """Everything real except the S3 transfer.
 
-    Chunks its transfers and polls cancel_cb between chunks, which is the
-    behaviour the real implementation has to have -- a student cancelling
-    a large upload should stop within a chunk, not at the end of the file.
+    begin_upload and finish_upload run the actual client code against the
+    fake site; only the byte transfer is replaced, since the real one is
+    boto3 talking to an S3 endpoint. Chunked, and polls cancel_cb between
+    chunks, because a student cancelling a large upload should stop within
+    a chunk rather than at the end of a file.
     """
 
     def __init__(self, site: FakePanoptoSite):
-        super().__init__(HOST, make_client(site)._auth, site)
+        login = make_login(site)
+        login.sign_in()
+        super().__init__(HOST, login, site)
         self.site = site
         self.received: dict[str, bytes] = {}
-        self.finished: list[str] = []
-        self.began = 0
-
-    def begin_upload(self, folder_id: str) -> UploadTarget:
-        self.began += 1
-        upload_id = f"upload-{self.began}"
-        self.site.uploads[upload_id] = {"folder": folder_id, "files": []}
-        return UploadTarget(upload_id=upload_id, folder_id=folder_id, destination="memory://")
 
     def put_upload_file(self, target, local_path, remote_name, progress_cb=None, cancel_cb=None):
         data = Path(local_path).read_bytes()
         sent = 0
         while sent < len(data):
             if cancel_cb is not None and cancel_cb():
-                raise UploadCancelled()
+                raise UploadAborted()
             sent = min(sent + CHUNK, len(data))
             if progress_cb is not None:
                 progress_cb(sent, len(data))
         self.received[remote_name] = data
         self.site.uploads[target.upload_id]["files"].append(remote_name)
 
-    def finish_upload(self, target) -> str:
-        self.finished.append(target.upload_id)
-        return f"session-{target.upload_id}"
+    @property
+    def finished(self) -> list[str]:
+        """Upload ids the real finish_upload actually completed."""
+        return [
+            upload_id
+            for upload_id, record in self.site.uploads.items()
+            if record.get("State") == UPLOAD_STATE_COMPLETE
+        ]
 
 
 class ManifestTest(unittest.TestCase):
@@ -146,6 +155,35 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(build_manifest(self.session, "Retake").title, "Retake")
 
 
+class AudioManifestTest(unittest.TestCase):
+    """A microphone track is a third entry in the UCS manifest, typed
+    Audio, and never becomes the Primary."""
+
+    @classmethod
+    def setUpClass(cls):
+        from test_audio_playback import record_with_audio
+
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.session = record_with_audio(cls._tmp.name, 1.0)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_audio_is_listed_as_an_audio_entry_after_the_videos(self):
+        manifest = build_manifest(self.session)
+        roles = [f.role for f in manifest.files]
+        self.assertEqual(roles, [THIRD_PERSON_STREAM, INSTRUMENT_STREAM, AUDIO_STREAM])
+        self.assertEqual(manifest.primary.role, THIRD_PERSON_STREAM)
+
+        root = ET.fromstring(build_ucs_manifest(manifest))
+        types = [
+            v.find(f"{{{UCS_NAMESPACE}}}Type").text
+            for v in root.findall(f"{{{UCS_NAMESPACE}}}Videos/{{{UCS_NAMESPACE}}}Video")
+        ]
+        self.assertEqual(types, ["Primary", "Secondary", "Audio"])
+
+
 class UploadTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -159,14 +197,17 @@ class UploadTest(unittest.TestCase):
     def setUp(self):
         self.session = Session.load(self.session_dir)
         self.site = FakePanoptoSite()
-        self.site.add_folder("parent", "Practice Recordings")
+        self.site.add_folder("parent", "Slit lamp practice")
         self.client = InMemoryUploadClient(self.site)
 
     def test_both_streams_arrive_whole_and_the_viewer_url_comes_back(self):
         url = upload_session(self.session, self.client, "parent")
 
-        self.assertEqual(set(self.client.received), {"third_person.mp4", "instrument.mp4"})
-        for role, info in self.session.streams.items():
+        self.assertEqual(
+            set(self.client.received),
+            {"third_person.mp4", "instrument.mp4", MANIFEST_FILENAME},
+        )
+        for role, info in self.session.streams.items():  # the videos, byte for byte
             self.assertEqual(
                 self.client.received[info.path.name],
                 info.path.read_bytes(),
@@ -215,9 +256,50 @@ class UploadTest(unittest.TestCase):
         self.assertEqual(self.client.finished, [])
         self.assertEqual(self.site.uploads["upload-1"]["files"], [])
 
+    def test_the_manifest_is_sent_last_so_it_never_describes_missing_files(self):
+        order: list[str] = []
+        original = self.client.put_upload_file
+
+        def watched(target, local_path, remote_name, **kwargs):
+            order.append(remote_name)
+            return original(target, local_path, remote_name, **kwargs)
+
+        self.client.put_upload_file = watched
+        upload_session(self.session, self.client, "parent")
+        self.assertEqual(order[-1], MANIFEST_FILENAME)
+
+    def test_the_manifest_describes_both_streams_with_their_offsets(self):
+        upload_session(self.session, self.client, "parent")
+        root = ET.fromstring(self.client.received[MANIFEST_FILENAME].decode("utf-8"))
+
+        videos = root.findall(f"{{{UCS_NAMESPACE}}}Videos/{{{UCS_NAMESPACE}}}Video")
+        described = {
+            video.find(f"{{{UCS_NAMESPACE}}}File").text: (
+                video.find(f"{{{UCS_NAMESPACE}}}Type").text,
+                video.find(f"{{{UCS_NAMESPACE}}}Start").text,
+            )
+            for video in videos
+        }
+        self.assertEqual(
+            described,
+            {"third_person.mp4": ("Primary", "PT0S"), "instrument.mp4": ("Secondary", "PT0S")},
+        )
+
+    def test_every_manifest_element_is_in_the_ucs_namespace(self):
+        # A child in no namespace (<Title xmlns="">) parses fine and then
+        # fails to match the schema on Panopto's side, which is the kind of
+        # failure that only shows up after a student has walked away.
+        upload_session(self.session, self.client, "parent")
+        root = ET.fromstring(self.client.received[MANIFEST_FILENAME].decode("utf-8"))
+        for element in root.iter():
+            self.assertTrue(
+                element.tag.startswith(f"{{{UCS_NAMESPACE}}}"),
+                f"{element.tag} is outside the UCS namespace",
+            )
+
     def test_upload_lands_in_the_folder_it_was_given(self):
         upload_session(self.session, self.client, "parent")
-        self.assertEqual(self.site.uploads["upload-1"]["folder"], "parent")
+        self.assertEqual(self.site.uploads["upload-1"]["FolderId"], "parent")
 
 
 if __name__ == "__main__":

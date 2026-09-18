@@ -40,6 +40,39 @@ class ExportCancelled(RuntimeError):
     """Raised out of export_session() when cancel_cb() asked it to stop."""
 
 
+def _add_audio_track(container, session: Session):
+    """An AAC track for the session's microphone, or None for a silent
+    session. Added before the first video packet so the container's
+    header lists both."""
+    info = session.audio
+    if info is None:
+        return None
+    try:
+        with av.open(str(info.path)) as source:
+            template = source.streams.audio[0]
+            return container.add_stream_from_template(template)
+    except Exception as exc:
+        logger.warning("%s: audio track skipped: %s", info.path.name, exc)
+        return None
+
+
+def _copy_audio(container, out_stream, session: Session, duration: float) -> None:
+    """Stream-copy the microphone track, already on the session clock, so
+    it lands against the video at the same media time. No re-encode: the
+    M4A is AAC already, and re-encoding would add nothing but time."""
+    info = session.audio
+    assert info is not None
+    with av.open(str(info.path)) as source:
+        in_stream = source.streams.audio[0]
+        for packet in source.demux(in_stream):
+            if packet.size == 0:
+                continue
+            if packet.pts is not None and float(packet.pts * in_stream.time_base) > duration + 1.0:
+                break  # the mic ran on past the last frame; nothing to hear there
+            packet.stream = out_stream
+            container.mux(packet)
+
+
 def _even(value: int) -> int:
     """libx264 with yuv420p needs even dimensions; a camera reporting an
     odd width/height would otherwise fail at encoder open."""
@@ -119,6 +152,7 @@ def export_session(
                 stream.width, stream.height = out_size
                 stream.pix_fmt = "yuv420p"
                 stream.codec_context.options = {"crf": str(crf), "preset": preset}
+                audio_stream = _add_audio_track(container, session)
 
                 for index in range(total):
                     if cancel_cb is not None and cancel_cb():
@@ -136,6 +170,8 @@ def export_session(
 
                 for packet in stream.encode(None):
                     container.mux(packet)
+                if audio_stream is not None:
+                    _copy_audio(container, audio_stream, session, player.duration)
             finally:
                 container.close()
 

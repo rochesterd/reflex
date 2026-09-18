@@ -43,12 +43,13 @@ from PySide6.QtWidgets import (
 
 from app_icon import ICON_SETTINGS, icon_path
 from camera import BaseCamera
-from compositor import fit_into_canvas
+from compositor import LAYOUT_MODES, LAYOUT_TITLES, fit_into_canvas
 from config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_RECORDING_FPS,
     ConfigError,
     load_config,
+    panopto_secret_path,
 )
 from qt_image import bgr_to_pixmap
 from uvc_camera import UvcCamera
@@ -786,6 +787,393 @@ class DeviceRow(QWidget):
         dialog.deleteLater()
 
 
+class AudioSection(QGroupBox):
+    """The microphone for record mode. Checkable; unchecked is a silent
+    kiosk, which every config before audio existed is. Devices are listed
+    by name and stored by name (config.py says why). Test microphone
+    captures a second and reports a level, so a technician can tell a
+    working mic from a muted one without a recording.
+    """
+
+    changed = Signal()
+
+    def __init__(self, list_devices_fn=None, capture_factory=None):
+        super().__init__("Record sound from a microphone")
+        self.setCheckable(True)
+        self.setChecked(False)
+        self._list_devices_fn = list_devices_fn or self._default_list_devices
+        self._capture_factory = capture_factory or self._default_capture
+
+        self.device_combo = QComboBox()
+        self.device_combo.addItem("System default microphone", None)
+        self.test_button = QPushButton("Test microphone")
+        self.test_button.clicked.connect(self._on_test_clicked)
+        self.test_status = QLabel()
+        self.test_status.setWordWrap(True)
+
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Microphone"), 0, 0)
+        grid.addWidget(self.device_combo, 0, 1)
+        grid.addWidget(self.test_button, 1, 1)
+        grid.addWidget(self.test_status, 2, 0, 1, 2)
+        self.setLayout(grid)
+
+        self.toggled.connect(self._on_changed)
+        self.device_combo.currentIndexChanged.connect(self._on_changed)
+        self.rescan()
+
+    @staticmethod
+    def _default_list_devices() -> list[tuple[int, str]]:
+        from audio_capture import list_input_devices
+
+        return list_input_devices()
+
+    @staticmethod
+    def _default_capture(device):
+        from audio_capture import AudioCapture
+
+        return AudioCapture(device=device)
+
+    def _on_changed(self, *_args) -> None:
+        self.changed.emit()
+
+    def rescan(self) -> None:
+        """Re-list devices, keeping the current choice if it's still there."""
+        current = self.device_combo.currentData()
+        self.device_combo.blockSignals(True)
+        self.device_combo.clear()
+        self.device_combo.addItem("System default microphone", None)
+        try:
+            names = []
+            for _index, name in self._list_devices_fn():
+                if name not in names:
+                    names.append(name)
+                    self.device_combo.addItem(name, name)
+            self.test_status.setText("" if names else "No microphones found.")
+        except Exception as exc:  # noqa: BLE001 -- no audio backend at all
+            self.test_status.setText(f"Could not list microphones: {exc}")
+        index = self.device_combo.findData(current)
+        self.device_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.device_combo.blockSignals(False)
+
+    def load_from(self, audio) -> None:
+        """Fill from config.AudioConfig, or stay off if None. A configured
+        device that isn't plugged in right now is still offered, so a
+        Save doesn't silently drop it."""
+        if audio is None:
+            self.setChecked(False)
+            return
+        self.setChecked(True)
+        if audio.device is not None and self.device_combo.findData(audio.device) < 0:
+            self.device_combo.addItem(f"{audio.device} (not connected)", audio.device)
+        self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(audio.device)))
+
+    def apply_to(self, data: dict) -> None:
+        existing = data.get("audio") if isinstance(data.get("audio"), dict) else None
+        if not self.isChecked():
+            data.pop("audio", None)
+            return
+        section: dict = {}
+        device = self.device_combo.currentData()
+        if device is not None:
+            section["device"] = device
+        for carry in ("samplerate", "channels"):
+            if existing and carry in existing:
+                section[carry] = existing[carry]
+        data["audio"] = section
+
+    def _on_test_clicked(self) -> None:
+        """Capture one second and report how loud it was."""
+        import time as _time
+
+        self.test_button.setEnabled(False)
+        self.test_status.setText("Listening for one second...")
+        QApplication.processEvents()
+        capture = None
+        try:
+            capture = self._capture_factory(self.device_combo.currentData())
+            capture.start()
+            peak = 0.0
+            deadline = _time.monotonic() + 1.0
+            while _time.monotonic() < deadline:
+                _time.sleep(0.05)
+                peak = max(peak, capture.level())
+            if capture.get_latest() is None:
+                self.test_status.setText("The microphone opened but delivered nothing. Check it is not disabled in Windows.")
+            elif peak < 0.005:
+                self.test_status.setText(f"Level {peak:.3f}: opened, but silent. Is it muted, or pointed the wrong way?")
+            else:
+                self.test_status.setText(f"Working. Peak level {peak:.2f} of 1.0 -- say something and test again to check it responds.")
+        except Exception as exc:  # noqa: BLE001 -- AudioUnavailable, or PortAudio's own
+            self.test_status.setText(str(exc))
+        finally:
+            if capture is not None:
+                try:
+                    capture.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.test_button.setEnabled(True)
+
+
+class StreamingSection(QGroupBox):
+    """Stream mode: the kiosk publishes both feeds as one virtual webcam
+    and Panopto Capture does the recording (DECISIONS.md 2026-09-18).
+    Checkable; unchecked is record mode, which is every existing config.
+
+    Only the layout is offered. Size and rate have measured defaults
+    (1080p30 is what a browser takes without argument) and live in
+    config.json for the rare room that needs otherwise, the way
+    orientation does for an instrument -- CLAUDE.md's ownership table.
+    """
+
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__("Stream to Panopto Capture instead of recording")
+        self.setCheckable(True)
+        self.setChecked(False)
+        self.setToolTip(
+            "When on, Reflex records nothing. It publishes the composed feed as a "
+            "virtual camera; students record in Panopto Capture, signed in as themselves."
+        )
+
+        self.layout_combo = QComboBox()
+        for mode in LAYOUT_MODES:
+            self.layout_combo.addItem(LAYOUT_TITLES[mode].format(instrument="Instrument", third_person="Third-person"), mode)
+
+        self.note = QLabel(
+            "The Reflex installer registers the virtual camera. In Panopto Capture, choose "
+            "the camera the kiosk's status line names (normally \"Unity Video Capture\")."
+        )
+        self.note.setWordWrap(True)
+
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Layout"), 0, 0)
+        grid.addWidget(self.layout_combo, 0, 1)
+        grid.addWidget(self.note, 1, 0, 1, 2)
+        self.setLayout(grid)
+
+        self.toggled.connect(self._on_changed)
+        self.layout_combo.currentIndexChanged.connect(self._on_changed)
+
+    def _on_changed(self, *_args) -> None:
+        self.changed.emit()
+
+    def load_from(self, streaming) -> None:
+        """Fill from config.StreamingConfig."""
+        self.setChecked(bool(streaming.enabled))
+        index = self.layout_combo.findData(streaming.layout)
+        if index >= 0:
+            self.layout_combo.setCurrentIndex(index)
+
+    def apply_to(self, data: dict) -> None:
+        """Write the section into `data`, carrying a hand-set size or rate
+        forward the way orientation is carried for an instrument."""
+        existing = data.get("streaming") if isinstance(data.get("streaming"), dict) else None
+        if not self.isChecked() and existing is None:
+            # Off and never on: leave the file as it was. Every config
+            # written before stream mode existed is exactly this case.
+            return
+        section = {"enabled": self.isChecked(), "layout": self.layout_combo.currentData()}
+        for carry in ("fps", "width", "height"):
+            if existing and carry in existing:
+                section[carry] = existing[carry]
+        data["streaming"] = section
+
+
+class PanoptoSection(QGroupBox):
+    """Panopto integration, for the technician who has what IT issued.
+    Checkable: unchecked means this machine does not upload, which is the
+    normal state and not an error.
+
+    Students sign in as themselves and upload into an Assignment Folder
+    (DECISIONS.md 2026-09-18), so there is no service account here -- just
+    the site, the API client's id, the folder, and the client secret if IT
+    issued one. That secret is write-only in this window: stored encrypted
+    to the machine (secret_store.py) and never read back into the field.
+    """
+
+    changed = Signal()
+
+    def __init__(self, config_path: Path):
+        super().__init__("Panopto integration")
+        self._config_path = Path(config_path)
+        self.setCheckable(True)
+        self.setChecked(False)
+
+        self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText("neco.hosted.panopto.com")
+        self.client_id_edit = QLineEdit()
+        self.client_id_edit.setPlaceholderText("API client id, from IT")
+        self.client_secret_edit = QLineEdit()
+        self.client_secret_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.folder_edit = QLineEdit()
+        self.folder_edit.setPlaceholderText("assignment folder id")
+
+        self.test_button = QPushButton("Test connection")
+        self.test_button.clicked.connect(self._on_test_clicked)
+        self.test_status = QLabel()
+        self.test_status.setWordWrap(True)
+
+        grid = QGridLayout()
+        rows = [
+            ("Site host", self.host_edit),
+            ("Client ID", self.client_id_edit),
+            ("Client secret", self.client_secret_edit),
+            ("Assignment folder", self.folder_edit),
+        ]
+        for index, (title, widget) in enumerate(rows):
+            grid.addWidget(QLabel(title), index, 0)
+            grid.addWidget(widget, index, 1)
+        grid.addWidget(self.test_button, len(rows), 1)
+        grid.addWidget(self.test_status, len(rows) + 1, 0, 1, 2)
+        self.setLayout(grid)
+
+        self.toggled.connect(self._on_changed)
+        for edit in (self.host_edit, self.client_id_edit, self.client_secret_edit, self.folder_edit):
+            edit.textChanged.connect(self._on_changed)
+
+        self._refresh_secret_placeholder()
+
+    def _on_changed(self, *_args) -> None:
+        self.changed.emit()
+
+    # -- state -----------------------------------------------------------
+
+    def load_from(self, panopto) -> None:
+        """Fill from a loaded config.PanoptoConfig, or stay off if None."""
+        if panopto is None:
+            self.setChecked(False)
+            return
+        self.setChecked(True)
+        self.host_edit.setText(panopto.host)
+        self.client_id_edit.setText(panopto.client_id)
+        self.folder_edit.setText(panopto.assignment_folder_id)
+        self._refresh_secret_placeholder()
+
+    def problem(self) -> str:
+        """Why this section cannot be saved yet, or "" if it can."""
+        if not self.isChecked():
+            return ""
+        missing = [
+            title
+            for title, edit in (
+                ("site host", self.host_edit),
+                ("client ID", self.client_id_edit),
+                ("assignment folder", self.folder_edit),
+            )
+            if not edit.text().strip()
+        ]
+        if missing:
+            return f"Panopto integration needs a {', '.join(missing)}."
+        return ""
+
+    def apply_to(self, data: dict) -> str:
+        """Write the section into `data` and store the secret, if any.
+
+        Returns a line for the status label about what happened to the
+        credential -- the one part of a save a technician cannot see.
+        """
+        if not self.isChecked():
+            data.pop("panopto", None)
+            return self._forget_secret()
+
+        existing = data.get("panopto") if isinstance(data.get("panopto"), dict) else {}
+        section = {
+            "host": self._host(),
+            "client_id": self.client_id_edit.text().strip(),
+            "assignment_folder_id": self.folder_edit.text().strip(),
+        }
+        # No field for it here; a hand-set override survives a save, the
+        # way orientation does for an instrument.
+        if "redirect_port" in existing:
+            section["redirect_port"] = existing["redirect_port"]
+        data["panopto"] = section
+
+        typed = self.client_secret_edit.text().strip()
+        if not typed:
+            return ""  # keeping whatever is stored, or nothing; nothing to report
+
+        from secret_store import write_secret
+
+        write_secret(panopto_secret_path(self._config_path), typed)
+        self.client_secret_edit.clear()
+        self._refresh_secret_placeholder()
+        return "Client secret encrypted to this machine."
+
+    def _forget_secret(self) -> str:
+        """Unchecking the box removes the credential rather than orphaning
+        it: a machine that no longer uploads has no business still holding
+        anything about the integration."""
+        path = panopto_secret_path(self._config_path)
+        if not path.exists():
+            return ""
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning("could not remove %s: %s", path, exc)
+            return f"Could not remove the stored client secret at {path}."
+        self._refresh_secret_placeholder()
+        return "Stored client secret removed."
+
+    def _has_stored_secret(self) -> bool:
+        return panopto_secret_path(self._config_path).exists()
+
+    def _refresh_secret_placeholder(self) -> None:
+        self.client_secret_edit.setPlaceholderText(
+            "stored -- type to replace" if self._has_stored_secret() else "from the API client, with the ID"
+        )
+
+    def _host(self) -> str:
+        return self.host_edit.text().strip().split("://", 1)[-1].split("/", 1)[0]
+
+    # -- test ------------------------------------------------------------
+
+    def _on_test_clicked(self) -> None:
+        """Sign in as the technician, then read the assignment folder.
+
+        Two checks rather than one: a refused sign-in and a folder this
+        account cannot see are different problems with different owners,
+        and "it did not work" sends a technician back to IT with nothing.
+        The sign-in opens a private browser window, the same way it will
+        for a student.
+        """
+        problem = self.problem()
+        if problem:
+            self.test_status.setText(problem)
+            return
+
+        from panopto_api import LoginCancelled, PanoptoClient, PanoptoError, UserLogin
+
+        secret = self.client_secret_edit.text().strip() or None
+        if secret is None and self._has_stored_secret():
+            from secret_store import SecretError, read_secret
+
+            try:
+                secret = read_secret(panopto_secret_path(self._config_path))
+            except SecretError as exc:
+                self.test_status.setText(str(exc))
+                return
+
+        self.test_button.setEnabled(False)
+        self.test_status.setText("Sign in using the browser window that just opened...")
+        QApplication.processEvents()
+        try:
+            login = UserLogin(self._host(), self.client_id_edit.text().strip(), secret)
+            login.sign_in()
+            folder = PanoptoClient(self._host(), login).folder(self.folder_edit.text().strip())
+        except LoginCancelled:
+            self.test_status.setText("Sign-in was not completed.")
+        except PanoptoError as exc:
+            self.test_status.setText(str(exc))
+        else:
+            self.test_status.setText(
+                f"Connected. Assignment folder: {folder.get('Name') or '(unnamed)'}."
+            )
+        finally:
+            self.test_button.setEnabled(True)
+
+
 class SettingsWindow(QMainWindow):
     def __init__(
         self,
@@ -795,6 +1183,8 @@ class SettingsWindow(QMainWindow):
         list_net2860_winusb_fn: Callable[[], list] = _default_list_net2860_winusb,
         instrument_preview_camera_factory: Callable[[RowCandidate], BaseCamera] = _default_make_instrument_camera,
         uvc_preview_camera_factory: Callable[[RowCandidate], BaseCamera] = _default_make_uvc_camera,
+        list_audio_devices_fn=None,
+        audio_capture_factory=None,
     ):
         super().__init__()
         self.setWindowTitle("Camera Settings")
@@ -851,6 +1241,13 @@ class SettingsWindow(QMainWindow):
             THIRD_PERSON_ROLE, THIRD_PERSON_TITLE, has_label=False, preview_camera_factory=uvc_preview_camera_factory
         )
 
+        self.audio_section = AudioSection(list_devices_fn=list_audio_devices_fn, capture_factory=audio_capture_factory)
+        self.audio_section.changed.connect(self._update_save_enabled)
+        self.streaming_section = StreamingSection()
+        self.streaming_section.changed.connect(self._update_save_enabled)
+        self.panopto_section = PanoptoSection(self.config_path)
+        self.panopto_section.changed.connect(self._update_save_enabled)
+
         self.rescan_button = QPushButton("Rescan")
         self.rescan_button.clicked.connect(self.rescan)
         self.save_button = QPushButton("Save")
@@ -872,6 +1269,9 @@ class SettingsWindow(QMainWindow):
         for row in self._all_rows():
             layout.addWidget(row)
             row.changed.connect(self._update_save_enabled)
+        layout.addWidget(self.audio_section)
+        layout.addWidget(self.streaming_section)
+        layout.addWidget(self.panopto_section)
         buttons = QHBoxLayout()
         buttons.addWidget(self.rescan_button)
         buttons.addWidget(self.save_button)
@@ -911,6 +1311,9 @@ class SettingsWindow(QMainWindow):
                 row.set_pending_selection(pending_key)
                 row.set_calibration(inst.exposure_time_us, inst.gain)
         self._third_person_row.set_pending_selection(cfg.third_person.vid_pid)
+        self.panopto_section.load_from(cfg.panopto)
+        self.streaming_section.load_from(cfg.streaming)
+        self.audio_section.load_from(cfg.audio)
         self._recording_fps = cfg.recording.fps
         for row in self._instrument_rows.values():
             row.target_fps = cfg.recording.fps
@@ -996,6 +1399,11 @@ class SettingsWindow(QMainWindow):
         else:
             self.omission_label.hide()
 
+        panopto_problem = self.panopto_section.problem()
+        if panopto_problem and not omitted:
+            self.omission_label.setText(panopto_problem)
+            self.omission_label.show()
+
         self.save_button.setEnabled(self._can_save())
 
     def _omitted_instrument_roles(self) -> list[str]:
@@ -1017,6 +1425,11 @@ class SettingsWindow(QMainWindow):
         if self._duplicate_serial_roles():
             return False
         if not self._third_person_row.is_valid():
+            return False
+        # A half-entered credential is not a saveable one: it would write a
+        # panopto section config.py then refuses to load, which locks the
+        # kiosk out of starting at all.
+        if self.panopto_section.problem():
             return False
         selected = [r for r in self._instrument_rows.values() if r.selected_key() is not None]
         return bool(selected) and all(r.is_valid() for r in selected)
@@ -1103,8 +1516,15 @@ class SettingsWindow(QMainWindow):
         for dead_key in ("sessions_dir", "retention"):
             data.pop(dead_key, None)
 
+        # After the camera rows, so a credential is only ever written
+        # alongside a config that was otherwise valid.
+        credential_note = self.panopto_section.apply_to(data)
+        self.streaming_section.apply_to(data)
+        self.audio_section.apply_to(data)
+
         self.config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        self.status_label.setText(f"Saved to {self.config_path}. Restart app.py to apply.")
+        saved = f"Saved to {self.config_path}. Restart app.py to apply."
+        self.status_label.setText(f"{saved} {credential_note}".strip())
         self.warning_label.hide()
 
 

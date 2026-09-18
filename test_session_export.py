@@ -157,5 +157,31 @@ class ExportTest(unittest.TestCase):
         self.assertTrue(out.exists())
 
 
+
+class AudioExportTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_a_silent_session_exports_video_only(self):
+        session = Session.load(record_session(self._tmp.name, 1))
+        out = export_session(session, Path(self._tmp.name) / "silent.mp4", fps=FPS)
+        with av.open(str(out)) as container:
+            self.assertEqual([s.type for s in container.streams], ["video"])
+
+    def test_an_audible_session_exports_with_an_aac_track(self):
+        from test_audio_playback import record_with_audio
+
+        session = record_with_audio(self._tmp.name, 1.5)
+        out = export_session(session, Path(self._tmp.name) / "audible.mp4", fps=FPS)
+        with av.open(str(out)) as container:
+            kinds = sorted(s.type for s in container.streams)
+            self.assertEqual(kinds, ["audio", "video"])
+            audio = container.streams.audio[0]
+            self.assertEqual(audio.codec_context.name, "aac")
+            samples = sum(frame.samples for frame in container.decode(audio))
+        self.assertGreater(samples, 48000)
+
+
 if __name__ == "__main__":
     unittest.main()
