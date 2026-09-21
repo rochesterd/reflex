@@ -12,6 +12,7 @@ from device_presets import (
     CUSTOM_PROFILE_ID,
     PROFILES,
     black_level_for_model,
+    floor_model_for_model,
     gamma_for_model,
     metering_for_model,
     pixel_format_for_model,
@@ -193,6 +194,34 @@ class BlackLevelForModelTest(unittest.TestCase):
         for token in profile.model_tokens:
             with self.subTest(token=token):
                 self.assertEqual(black_level_for_model(token), profile.black_level)
+
+
+
+class FloorModelTest(unittest.TestCase):
+    """The slit lamp's measured floor (DECISIONS.md 2026-09-21)."""
+
+    def test_reproduces_the_dark_frame_at_gain_three(self):
+        floor = floor_model_for_model("UI325xCP-C")
+        self.assertIsNotNone(floor)
+        black = floor.black(3.0, 4095)
+        for got, measured in zip(black, (517.3, 391.2, 548.9)):
+            self.assertAlmostEqual(got, measured, delta=6.0)
+        sigma = floor.sigma(3.0, 4095)
+        for got, measured in zip(sigma, (24.6, 18.4, 26.0)):
+            self.assertAlmostEqual(got, measured, delta=1.0)
+
+    def test_the_floor_is_not_neutral(self):
+        # R and B above G is the purple the single master value left behind.
+        r, g, b = floor_model_for_model("UI325xCP-C").black(1.0, 4095)
+        self.assertGreater(r, g + 15)
+        self.assertGreater(b, g + 15)
+
+    def test_black_never_goes_negative(self):
+        self.assertEqual(min(floor_model_for_model("UI325xCP-C").black(0.0, 4095)), 0.0)
+
+    def test_the_keeler_has_none(self):
+        # It curves on board; the floor model is for host curves only.
+        self.assertIsNone(floor_model_for_model("U3-327xCP-C"))
 
 
 if __name__ == "__main__":

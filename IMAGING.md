@@ -101,8 +101,11 @@ Answers to what this section used to list as unknown. See DECISIONS.md's
   arrives with the same 248 distinct levels as an 8-bit one. The extra bits
   are only worth anything if a tone curve is applied *before* that
   conversion, which `ids_camera._to_bgr8()` now does.
-- **The host tone curve, measured 2026-09-17** (`ids_peak_ipl`'s
-  `GammaCorrector`, synthetic ramp over the bottom 10% of the range, gamma
-  2.0): a 12-bit capture comes out in 77 distinct steps, an 8-bit one in
-  40. It accepts Bayer 8/10/12 and BGR/RGB directly, range 0.3-3.0, above
-  1.0 lifts shadows. 6.9ms a frame at 1600x1200 against 4.4ms uncurved.
+- **The host tone curve** (`tone_curve.py`: per-channel 12-bit lookup
+  tables plus a host demosaic, 9.3ms a frame at 1600x1200): a 12-bit
+  capture keeps 77 distinct shadow steps where an 8-bit one keeps 40.
+- **The slit lamp's floor, dark frame 2026-09-21, gains 1-4:** black is
+  R 117 / G 90 / B 125 of 4095 at gain 1 and rises ~204 / 153 / 216 per
+  unit of gain; temporal sigma rises ~7.6 / 5.8 / 8.1 per unit of gain;
+  fixed pattern (rows, columns) stays under 5 at gain 3. The floor is not
+  neutral, and it is 19-24% of full scale at gain 3.

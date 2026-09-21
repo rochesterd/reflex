@@ -87,12 +87,19 @@ from ids_peak_ipl import ids_peak_ipl
 from camera import BaseCamera
 from device_presets import (
     black_level_for_model,
-    digital_black_per_gain_for_model,
+    floor_model_for_model,
     gamma_for_model,
     metering_for_model,
     pixel_format_for_model,
     orientation_for_model,
     pixel_clock_hz_for_model,
+)
+from tone_curve import (
+    ToneCurve,
+    build_luts,
+    floor_slope_for_noise,
+    max_gain_for_noise,
+    raw_to_bgr8,
 )
 from exposure_calibration import (
     DEFAULT_MAX_ITERATIONS,
@@ -231,7 +238,11 @@ class IdsCamera(BaseCamera):
         # like orientation and black level. Applied on the camera when it
         # has a Gamma node, otherwise in _grab() by this corrector.
         self._gamma = gamma
-        self._host_corrector = None
+        # The host-side curve as three per-channel lookup tables (R, G, B),
+        # 12-bit raw in, 8-bit out -- see tone_curve.py. None means no host
+        # curve: the frame goes through IDS's own conversion. Swapped whole,
+        # never mutated: _grab() reads this reference from its thread.
+        self._host_luts = None
         # Per-instrument calibrated values from config.json (InstrumentConfig's
         # optional exposure_time_us/gain fields) -- see DECISIONS.md's
         # 2026-08-25 calibration entry. None means "let _converge_auto_nodes()
@@ -568,14 +579,31 @@ class IdsCamera(BaseCamera):
 
     def set_gain(self, value: float) -> None:
         self._node_map.FindNode("Gain").SetValue(value)
-        # The black floor scales with gain, and so must what the host
-        # curve subtracts -- see _set_host_gamma().
-        if self._host_corrector is not None:
+        # The floor and its noise scale with gain, and so must what the
+        # host curve subtracts and how far it lifts -- see _set_host_gamma().
+        if self._host_luts is not None:
             self._set_host_gamma(self._resting_gamma())
 
     def gain_range(self) -> tuple[float, float]:
         node = self._node_map.FindNode("Gain")
         return float(node.Minimum()), float(node.Maximum())
+
+    def gain_ceiling(self) -> float:
+        """The most gain worth using on this camera: where its floor's
+        noise, through a straight line, reaches the model's tolerance --
+        the same ceiling auto_calibrate() stops at. The node's own maximum
+        when the model has no measured floor. Reported by settings.py so
+        "3.3x of 3.3 usable" reads as the limit it is, not as headroom."""
+        _gain_min, gain_max = self.gain_range()
+        floor = floor_model_for_model(self._model_name)
+        if floor is None:
+            return gain_max
+        return min(
+            max_gain_for_noise(ks, cs, kb, cb, floor.max_output_sigma, gain_max)
+            for ks, cs, kb, cb in zip(
+                floor.sigma_slope, floor.sigma_intercept, floor.black_slope, floor.black_intercept
+            )
+        )
 
     BRIGHTNESS_ADJUSTABLE = True
     # What a camera *does* with the amount differs, deliberately: the
@@ -638,32 +666,38 @@ class IdsCamera(BaseCamera):
 
     def _set_host_gamma(self, gamma: float) -> None:
         """Arm (or disarm, at 1.0) the host-side tone curve _grab() applies
-        before the 8-bit conversion, where a higher-depth capture still has
-        its extra shadow levels. ids_peak_ipl's corrector takes the same
-        0.3-3.0 range with the same sense as the Keeler's node -- above 1.0
-        lifts shadows -- confirmed on a synthetic ramp, 2026-09-17."""
+        to the raw 12-bit frame, in place of IDS's conversion.
+
+        Built from the model's measured floor (device_presets.FloorModel)
+        at the *current* gain: each channel's black is subtracted so the
+        floor is neutral, and the curve's toe slope is set so the floor's
+        noise comes out at no more than the model's max_output_sigma --
+        tone_curve.py has the construction and DECISIONS.md 2026-09-21 the
+        measurements. Without a floor model the curve is a bare gamma
+        with no black, which is what the corrector used to be.
+        """
         if abs(gamma - 1.0) < 1e-6:
-            self._host_corrector = None
+            self._host_luts = None
             return
-        corrector = ids_peak_ipl.GammaCorrector()
-        corrector.SetGammaCorrectionValue(
-            min(float(corrector.GammaCorrectionMax()), max(float(corrector.GammaCorrectionMin()), gamma))
-        )
-        # Subtract the sensor's floor first, or the curve lifts empty space
-        # into haze along with the picture. It scales with gain, so this is
-        # re-armed from set_gain().
-        per_gain = digital_black_per_gain_for_model(self._model_name)
-        if per_gain:
-            black = per_gain * self.get_gain()
-            corrector.SetDigitalBlack(
-                min(float(corrector.DigitalBlackMax()), max(float(corrector.DigitalBlackMin()), black))
+        full_scale = 4095
+        floor = floor_model_for_model(self._model_name)
+        if floor is None:
+            curve = ToneCurve(gamma=gamma, black=(0.0, 0.0, 0.0), floor_slope=64.0)
+        else:
+            gain = self.get_gain()
+            black = floor.black(gain, full_scale)
+            sigma = floor.sigma(gain, full_scale)
+            # One slope for all three channels -- the noisiest decides --
+            # so a flat grey stays grey through the toe.
+            slope = min(
+                floor_slope_for_noise(sg, bk, full_scale, floor.max_output_sigma)
+                for sg, bk in zip(sigma, black)
             )
-        # A new corrector swapped in whole, never one mutated in place:
-        # _grab() reads this reference from the capture thread.
-        self._host_corrector = corrector
+            curve = ToneCurve(gamma=gamma, black=black, floor_slope=slope)
+        self._host_luts = build_luts(curve)
         logger.info(
-            "%s: host tone curve, gamma %.2f, digital black %.3f",
-            self.label, corrector.GammaCorrectionValue(), corrector.DigitalBlack(),
+            "%s: host tone curve, gamma %.2f, black R%.0f G%.0f B%.0f, floor slope %.2f",
+            self.label, curve.gamma, *curve.black, curve.floor_slope,
         )
 
     def _apply_light(self, amount: float) -> None:
@@ -917,6 +951,10 @@ class IdsCamera(BaseCamera):
         self._ensure_manual_gain()
         exposure_range = self.exposure_time_range_us()
         gain_range = self.gain_range()
+        # Above the ceiling even a straight line shows the floor's noise;
+        # the answer past it is light, not gain, and the technician's
+        # calibration report says where it stopped.
+        gain_range = (gain_range[0], max(gain_range[0], self.gain_ceiling()))
         # Exposure is a frame-rate budget. Without this the search spends
         # the whole frame interval to avoid gain -- see
         # next_exposure_gain()'s docstring and DECISIONS.md. Falls back to
@@ -961,7 +999,7 @@ class IdsCamera(BaseCamera):
             node = self._node_map.FindNode("Gamma")
             node.SetValue(min(float(node.Maximum()), max(float(node.Minimum()), 1.0)))
         else:
-            self._host_corrector = None
+            self._host_luts = None
 
     def _wait_for_fresh_frame(self) -> np.ndarray:
         """A frame already queued when ExposureTime/Gain just changed was
@@ -1019,7 +1057,7 @@ class IdsCamera(BaseCamera):
         # frame on both real cameras.
         frame_id = buffer.FrameID()
         image = ids_peak_ipl.Image.from_image_view(buffer.ToImageView())
-        array = _to_bgr8(image, self._host_corrector)
+        array = _to_bgr8(image, self._host_luts)
         self._data_stream.QueueBuffer(buffer)
 
         return array, timestamp, frame_id
@@ -1040,23 +1078,23 @@ class IdsCamera(BaseCamera):
         )
 
 
-def _to_bgr8(image, corrector=None) -> np.ndarray:
-    """One captured Image as a BGR8 array, tone-curved first if asked.
+def _to_bgr8(image, luts=None) -> np.ndarray:
+    """One captured Image as a BGR8 array.
 
-    The curve goes *before* the conversion because that is the only moment
-    a 12-bit capture still has 12 bits: converted first, it arrives with
-    the same levels as an 8-bit one and the curve stretches 40 shadow steps
-    instead of 77 (measured 2026-09-17).
+    With `luts` (a 12-bit BayerRG capture and an armed host curve) the raw
+    samples go through tone_curve's per-channel tables and its demosaic --
+    black subtracted per channel and the curve applied while the frame
+    still has 12 bits, which is the only moment the shadow levels exist.
+    Without, IDS's own conversion, as for the Keeler and any 8-bit format.
 
     Every intermediate stays in a local until the pixels are copied out:
-    get_numpy_3D() is a view that does not keep its Image alive, and
-    reading it after the Image is collected is an access violation, not an
-    exception. Process(), not ProcessInPlace(): the input wraps the
-    driver's own buffer.
+    the numpy views do not keep their Image alive, and reading one after
+    the Image is collected is an access violation, not an exception.
     """
-    # The name constant, not the PixelFormat object: the binding rejects the
-    # object with a TypeError (caught by test_ids_camera.py, not hardware).
-    if corrector is not None and corrector.IsPixelFormatSupported(image.PixelFormat().PixelFormatName()):
-        image = corrector.Process(image)
+    if luts is not None and image.PixelFormat().PixelFormatName() == ids_peak_ipl.PixelFormatName_BayerRG12:
+        raw = np.array(image.get_numpy_2D_16(), copy=True)
+        return raw_to_bgr8(raw, luts)
     converted = image.ConvertTo(ids_peak_ipl.PixelFormatName_BGR8)
     return converted.get_numpy_3D().copy()
+
+

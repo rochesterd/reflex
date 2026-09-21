@@ -407,13 +407,23 @@ class PreviewDialog(QDialog):
         exposure_us = self._camera.get_exposure_time_us()
         gain = self._camera.get_gain()
         _gain_min, gain_max = self._camera.gain_range()
+        # The usable ceiling can sit below the node's maximum: past it the
+        # sensor's floor noise shows through even a straight line
+        # (DECISIONS.md 2026-09-21), so say so rather than imply headroom.
+        ceiling = getattr(self._camera, "gain_ceiling", lambda: gain_max)()
         possible_fps = 1_000_000.0 / max(exposure_us, 1e-6)
+        if ceiling < gain_max - 0.05:
+            gain_text = f"gain {gain:.1f}x of {ceiling:.1f} usable ({gain_max:.1f} max)"
+        else:
+            gain_text = f"gain {gain:.1f}x of {gain_max:.1f} max"
         parts = [
             f"exposure {exposure_us / 1000:.1f}ms",
-            f"gain {gain:.1f}x of {gain_max:.1f} max",
+            gain_text,
             f"allows ~{possible_fps:.0f}fps",
         ]
         text = "   |   ".join(parts)
+        if gain >= ceiling - 0.05 and ceiling < gain_max - 0.05:
+            text += "   <-- at the gain ceiling: more gain would only add grain. Add light at the instrument."
         if self._target_fps and possible_fps < self._target_fps:
             text += (
                 f"   <-- BELOW the {self._target_fps:g}fps recording target, "

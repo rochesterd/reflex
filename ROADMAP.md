@@ -63,14 +63,14 @@ keep the numbers in the DECISIONS entry.
   and check noise at the gain it picks. Adjust the numbers or record that
   they held.
 - **Confirm the resting tone curves on real subjects** (DECISIONS
-  2026-09-17). Both are set and both provisional: the slit lamp's (gamma
-  1.8, 12-bit, digital black 0.025 per gain) was chosen on a matte-black
-  focus rod, the Keeler's (1.5) on skin. Check each on an eye / a fundus,
-  at full resolution for noise as well as brightness;
-  `tools/measure_picture.py <serial> gamma ... --calibrate` re-sweeps one
-  in seconds. No recalibration is needed after a change: Auto-Calibrate
-  meters with the curve off. The Keeler's LUT only if one exponent proves
-  too blunt.
+  2026-09-17, and 2026-09-21 for the slit lamp's toe, per-channel floor
+  and gain ceiling). Both provisional: the slit lamp's gamma 1.8 was
+  chosen on a matte-black focus rod, the Keeler's 1.5 on skin. Check each
+  on an eye / a fundus; `tools/measure_picture.py <serial> gamma ...
+  --calibrate` re-sweeps one in seconds. No recalibration is needed after
+  a change: Auto-Calibrate meters with the curve off. The one number to
+  revisit on the slit lamp is `FloorModel.max_output_sigma` (2.0), the
+  noise the toe tolerates; 2.5 buys ~6 levels of lift for 0.3 of flicker.
 - **Hands camera exposure.** Today the two-second warmup's result is frozen,
   so every session starts from whatever the room looked like. Have
   `settings.py` record the converged value at calibration time and

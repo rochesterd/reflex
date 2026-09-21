@@ -99,11 +99,10 @@ That line is the whole check. Compare it against this:
 | `allows ~30fps` or higher | Good. Move on. |
 | `<-- BELOW the 30fps recording target, and blurs motion. Add light at the instrument.` | **Don't accept it.** Turn the instrument's illumination up, or open its aperture, and press Auto-Calibrate again. If you save this, students get juddery, blurred recordings of exactly the hand movement they're trying to study. |
 | `Couldn't reach target brightness automatically` | Use the **Exposure** slider by hand: raise it until the bright part of the picture looks bright but not washed out to white. Keep **Gain** as low as you can — gain adds grain. |
+| `<-- at the gain ceiling: more gain would only add grain. Add light at the instrument.` | The camera has hit the most gain its sensor can use cleanly. Past it the picture fills with flickering coloured grain that no setting removes. Add light and press Auto-Calibrate again. |
 
-Normal gain depends on the instrument. The slit lamp (4x ceiling, bright
-beam) should sit at 1–2x; near 4x means too little light. The BIO's view is
-far dimmer at the sensor, so gain in the teens of its 25x is normal, not a
-warning. On either, a grainy picture wants more light, never more gain.
+Normal gain depends on the instrument. The slit lamp should sit at 1–2x (its usable ceiling is ~3.3x of
+a 4x maximum; reaching it means too little light); the BIO's dimmer view runs in the teens of its 25x. Grain wants light, never gain.
 
 ### 6. Close Preview and repeat for the other instrument
 

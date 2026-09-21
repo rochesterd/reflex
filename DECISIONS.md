@@ -5592,3 +5592,57 @@ browser's microphone; Reflex does nothing.
 microphone is where a technician tells a working mic from a muted one.
 
 ---
+
+## 2026-09-21 — The slit lamp's curve gets a toe, a per-channel floor and a gain ceiling
+
+**Found:** after a fresh calibration the slit lamp's picture showed a
+flickering mesh of red, green and blue lines on any dark background. Not
+the new build and not what Settings wrote -- the 2026-09-17 curve, a bare
+gamma 1.8 on 12-bit data with one master black subtracted, reproduced on
+the dev machine at gain 3. A bare power curve has infinite slope at zero,
+so its steepest stretch lands on the sensor's floor, which is read noise;
+the floor is not neutral, so the residue was purple; and both scale with
+gain, so a calibration that spent gain made it worse. Stretched crops and
+a dark frame (lens covered, gains 1-4) put numbers on it:
+
+- black, of 4095: R 117 / G 90 / B 125 at gain 1, rising ~204 / 153 / 216
+  per unit of gain. At gain 3 that is 517 / 391 / 549; the old subtraction
+  took off 307. Two-thirds of the pedestal was being lifted as picture.
+- temporal sigma: ~7.6 / 5.8 / 8.1 per unit of gain. Fixed pattern (rows,
+  columns) under 5 at gain 3 -- no per-camera map needed.
+- on a dark background at gain 3, 8-bit: flicker 2.6-3.0 and horizontal
+  banding 1.2-2.6 with the curve, 1.2 and 0.9 without.
+
+**Decision:** `tone_curve.py` replaces the IDS `GammaCorrector` with
+per-channel 12-bit lookup tables and a host demosaic (9.3ms a frame at
+1600x1200, against 57% of a core before). Three parts, one change:
+
+1. **An offset gamma -- sRGB's construction -- instead of a bare one:**
+   `((x+c)^(1/g) - c^(1/g)) / ((1+c)^(1/g) - c^(1/g))`, with c solved so
+   the slope at black is a chosen `floor_slope`. A linear toe joined to
+   the bare curve was tried first and rejected: to meet the curve's
+   height its slope is `toe^(1/g-1)`, 5x at these numbers.
+2. **Black per channel**, from `device_presets.FloorModel` -- black and
+   sigma as lines in gain, per channel, measured above. `floor_slope` is
+   set at each gain so the floor's noise comes out at no more than
+   `max_output_sigma` = 2.0 levels through a straight line.
+3. **A gain ceiling**, derived: the gain at which even a straight line
+   shows more than that -- 3.3 on this sensor. `auto_calibrate()` stops
+   there, and Settings' cost line reads "of 3.3 usable (4.0 max)" with
+   "add light" when it is reached. Above it, more gain only adds grain.
+
+**Measured after, same scene, gain 3:** background flicker 1.33 (the
+straight line's 1.17-1.3), banding within a level of it, the floor
+neutral at 5-7 instead of purple at 32-55, the mesh gone in the crops.
+The rod's face: 46 -- against 69 through a straight line *with* the
+pedestal still in it (32 of that was floor), and 106 under the old curve
+with the mesh. At gain 3 the tolerance leaves a slope of 1.05, so the
+curve is nearly straight: this sensor cannot afford a lift there. At gain
+1 the slope is 3 and the lift is real. Loosening the tolerance buys ~6
+levels on the rod per 0.5, at 0.3 of flicker each (2.5: 52 at 1.61; 3.0:
+57 at 1.97) -- one number in the profile if that trade is wanted.
+
+**Still provisional:** the floor is per model, measured on one unit; the
+17th's "until seen on an eye" still stands for the gamma itself.
+
+---

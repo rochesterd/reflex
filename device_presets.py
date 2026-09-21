@@ -43,6 +43,44 @@ CUSTOM_PROFILE_ID = "custom"
 
 
 @dataclass(frozen=True)
+class FloorModel:
+    """A sensor's black floor and its noise, per channel, as straight
+    lines in gain -- fractions of full scale per unit gain plus an
+    intercept. Measured on a dark frame (lens covered) at gains 1-4;
+    tone_curve.py subtracts the black per channel and sets the curve's
+    toe from the noise. DECISIONS.md 2026-09-21.
+
+    Per model, not per camera: the 2026-09-13 black-level entry accepted
+    that a sensor's floor is a property of the design, and this
+    measurement showed no fixed pattern worth a per-unit map (rows and
+    columns under 5 of 4095 at gain 3, against a temporal sigma of 25).
+    """
+
+    # (R, G, B): black = slope * gain + intercept, as fractions of full scale
+    black_slope: tuple[float, float, float]
+    black_intercept: tuple[float, float, float]
+    # (R, G, B): temporal sigma = slope * gain + intercept, fractions of full scale
+    sigma_slope: tuple[float, float, float]
+    sigma_intercept: tuple[float, float, float]
+    # The floor noise a viewer tolerates, in 8-bit output levels through a
+    # straight line. Sets the curve's toe slope at each gain, and the gain
+    # above which no curve helps -- Auto-Calibrate's ceiling.
+    max_output_sigma: float = 2.0
+
+    def black(self, gain: float, full_scale: int) -> tuple[float, float, float]:
+        return tuple(
+            max(0.0, (k * gain + c) * full_scale)
+            for k, c in zip(self.black_slope, self.black_intercept)
+        )  # type: ignore[return-value]
+
+    def sigma(self, gain: float, full_scale: int) -> tuple[float, float, float]:
+        return tuple(
+            max(0.0, (k * gain + c) * full_scale)
+            for k, c in zip(self.sigma_slope, self.sigma_intercept)
+        )  # type: ignore[return-value]
+
+
+@dataclass(frozen=True)
 class DeviceProfile:
     """One supported instrument camera.
 
@@ -95,7 +133,10 @@ class DeviceProfile:
     # a curve lifts it like anything else -- empty space turns to haze.
     # Per gain because the floor scales with it. Set a little *under* the
     # measured floor: haze is recoverable, crushed blacks are not.
-    digital_black_per_gain: float | None = None
+    # The sensor's floor and noise per channel, for cameras whose tone
+    # curve runs on the host. None for a camera that curves on board (the
+    # Keeler) or has no curve.
+    floor: FloorModel | None = None
     # One line for the technician, shown under the profile in settings.py.
     note: str = ""
 
@@ -146,9 +187,18 @@ PROFILES: tuple[DeviceProfile, ...] = (
         # hardest case, not the typical one.
         gamma=1.8,
         pixel_format="BayerRG12",
-        # The floor measures 7.0 of 255 at gain 1.0 (0.0275) and scales
-        # with gain. 0.030 already crushed 1% of the frame; 0.025 none.
-        digital_black_per_gain=0.025,
+        # Dark frame, lens covered, gains 1-4, 2026-09-21. Black at gain 1
+        # is R 117 / G 90 / B 125 of 4095 -- the "7 of 255" the 17th saw --
+        # and rises ~204/153/216 per unit gain: not neutral, which is what
+        # left a purple residue when one master value was subtracted.
+        # Sigma rises ~7.6/5.8/8.1 per unit gain. Fixed pattern under 5.
+        floor=FloorModel(
+            black_slope=(0.0497, 0.0375, 0.0527),
+            black_intercept=(-0.0219, -0.0162, -0.0233),
+            sigma_slope=(0.00186, 0.00141, 0.00197),
+            sigma_intercept=(0.00050, 0.00035, 0.00053),
+            max_output_sigma=2.0,
+        ),
         note="No auto-exposure of its own: calibrate it in Preview before first use.",
     ),
     DeviceProfile(
@@ -242,10 +292,10 @@ def gamma_for_model(model_name: str | None) -> float | None:
     return profile.gamma if profile is not None else None
 
 
-def digital_black_per_gain_for_model(model_name: str | None) -> float | None:
-    """Floor to subtract before a host curve, per unit of gain, or None."""
+def floor_model_for_model(model_name: str | None) -> FloorModel | None:
+    """The measured floor for a model with a host-side tone curve."""
     profile = profile_for_model(model_name)
-    return profile.digital_black_per_gain if profile is not None else None
+    return profile.floor if profile is not None else None
 
 
 def pixel_format_for_model(model_name: str | None) -> str | None:

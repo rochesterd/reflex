@@ -1053,6 +1053,46 @@ class CalibrationCostReportingTest(unittest.TestCase):
         self.assertIn("50fps", text)
         self.assertNotIn("BELOW", text)  # 50fps clears a 30fps target
 
+    def test_cost_line_names_a_gain_ceiling_below_the_node_maximum(self):
+        """The slit lamp's usable gain stops where its floor noise shows
+        through a straight line (DECISIONS.md 2026-09-21); "3.3 of 4.0"
+        would read as headroom, so the line names the ceiling instead."""
+        from settings import PreviewDialog
+
+        class _Ceilinged(_FakeCalibratableCamera):
+            def gain_ceiling(self) -> float:
+                return 3.3
+
+        camera = _Ceilinged()
+        dialog = PreviewDialog(camera, "Slit Lamp", target_fps=30)
+        try:
+            camera.set_exposure_time_us(20_000.0)
+            camera.set_gain(2.0)
+            below = dialog._calibration_cost()
+            camera.set_gain(3.3)
+            at = dialog._calibration_cost()
+        finally:
+            dialog._shutdown()
+
+        self.assertIn("of 3.3 usable (8.0 max)", below)
+        self.assertNotIn("ceiling", below)
+        self.assertIn("at the gain ceiling", at)
+        self.assertIn("Add light", at)
+
+    def test_cost_line_is_unchanged_for_a_camera_with_no_ceiling(self):
+        from settings import PreviewDialog
+
+        camera = _FakeCalibratableCamera()
+        dialog = PreviewDialog(camera, "BIO", target_fps=30)
+        try:
+            camera.set_gain(4.0)
+            text = dialog._calibration_cost()
+        finally:
+            dialog._shutdown()
+        self.assertIn("of 8.0 max", text)
+        self.assertNotIn("usable", text)
+        self.assertNotIn("ceiling", text)
+
     def test_cost_line_calls_out_an_exposure_below_the_recording_target(self):
         from settings import PreviewDialog
 

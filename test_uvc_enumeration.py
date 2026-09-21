@@ -51,9 +51,16 @@ class ListUvcDevicesTest(unittest.TestCase):
 
         import cv2
 
+        # A registered virtual camera (stream mode's Unity Capture filter,
+        # or OBS's) is a DirectShow device with nothing behind it until
+        # its producer runs, so it lists but will not open. It still holds
+        # an index in the open order, which is what this test is about.
+        virtual = ("unity video capture", "obs virtual camera", "obs-camera")
         for device in devices:
             cap = cv2.VideoCapture(device.index, cv2.CAP_DSHOW)
             try:
+                if not cap.isOpened() and device.name.lower() in virtual:
+                    continue
                 self.assertTrue(cap.isOpened(), f"index {device.index} ({device.name!r}) did not open")
             finally:
                 cap.release()
