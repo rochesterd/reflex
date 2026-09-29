@@ -1187,30 +1187,30 @@ class ProcessingSwitchControlTest(unittest.TestCase):
         self.addCleanup(dialog._shutdown)
         return dialog, camera
 
-    def test_off_by_default_and_the_processed_controls_are_greyed(self):
+    def test_on_by_default_and_the_processed_controls_are_live(self):
         dialog, camera = self._dialog()
-        self.assertFalse(dialog.processing_box.isChecked())
-        self.assertFalse(dialog.gamma_slider.isEnabled())
-        self.assertFalse(dialog.denoise_slider.isEnabled())
+        self.assertTrue(dialog.processing_box.isChecked())
+        self.assertTrue(dialog.gamma_slider.isEnabled())
+        self.assertTrue(dialog.denoise_slider.isEnabled())
         # The frame-rate budget and metering are not host processing.
         self.assertTrue(dialog.fps_combo.isEnabled())
         self.assertTrue(dialog.metering_combo.isEnabled())
         self.assertEqual(dialog.final_picture, {})
 
-    def test_turning_it_on_is_live_and_enables_the_rest(self):
+    def test_turning_it_off_is_live_and_greys_the_rest(self):
         dialog, camera = self._dialog()
-        dialog.processing_box.setChecked(True)
-        self.assertEqual(camera.writes[-1], ("processing", True))
-        self.assertIs(dialog.final_picture["processing"], True)
-        self.assertTrue(dialog.gamma_slider.isEnabled())
         dialog.processing_box.setChecked(False)
         self.assertEqual(camera.writes[-1], ("processing", False))
+        self.assertIs(dialog.final_picture["processing"], False)
         self.assertFalse(dialog.gamma_slider.isEnabled())
+        dialog.processing_box.setChecked(True)
+        self.assertEqual(camera.writes[-1], ("processing", True))
+        self.assertTrue(dialog.gamma_slider.isEnabled())
 
-    def test_a_saved_on_comes_back_on(self):
-        dialog, _ = self._dialog(picture={"processing": True})
-        self.assertTrue(dialog.processing_box.isChecked())
-        self.assertTrue(dialog.shadow_slider.isEnabled())
+    def test_a_saved_off_comes_back_off(self):
+        dialog, _ = self._dialog(picture={"processing": False})
+        self.assertFalse(dialog.processing_box.isChecked())
+        self.assertFalse(dialog.shadow_slider.isEnabled())
 
 
 class PictureSaveTest(SettingsWindowTest):

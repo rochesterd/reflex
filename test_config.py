@@ -803,8 +803,8 @@ class DenoiseAndMeteringConfigTest(unittest.TestCase):
 
 
 class ProcessingSwitchTest(unittest.TestCase):
-    """Host processing is off unless a technician turned it on: the
-    camera's own picture is the baseline (DECISIONS.md 2026-09-29)."""
+    """Host processing is on unless a technician turned it off; the
+    camera's own picture is the comparison (DECISIONS.md 2026-09-29)."""
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -816,13 +816,13 @@ class ProcessingSwitchTest(unittest.TestCase):
         data["instruments"]["slit_lamp"].update(slit_lamp)
         self.path.write_text(json.dumps(data), encoding="utf-8")
 
-    def test_off_by_default(self):
+    def test_on_by_default(self):
         self._write()
-        self.assertFalse(load_config(self.path).instruments["slit_lamp"].processing)
-
-    def test_on_when_asked_and_only_a_bool(self):
-        self._write(processing=True)
         self.assertTrue(load_config(self.path).instruments["slit_lamp"].processing)
+
+    def test_off_when_asked_and_only_a_bool(self):
+        self._write(processing=False)
+        self.assertFalse(load_config(self.path).instruments["slit_lamp"].processing)
         self._write(processing="yes")
         with self.assertRaises(ConfigError):
             load_config(self.path)

@@ -434,7 +434,7 @@ class PreviewDialog(QDialog):
         self.processing_box = QCheckBox(
             "Apply Reflex's picture processing (tone curve, black removal, frame averaging)"
         )
-        self.processing_box.setChecked(bool(self._initial_picture.get("processing", False)))
+        self.processing_box.setChecked(bool(self._initial_picture.get("processing", True)))
         self.processing_box.toggled.connect(self._on_processing_toggled)
         inner.addWidget(self.processing_box)
         self._processed_controls: list = []
@@ -1510,7 +1510,7 @@ class SettingsWindow(QMainWindow):
                     "min_fps": inst.min_fps,
                     "denoise_frames": inst.denoise_frames,
                     "metering": inst.metering,
-                    "processing": True if inst.processing else None,
+                    "processing": None if inst.processing else False,
                 })
         self._third_person_row.set_pending_selection(cfg.third_person.vid_pid)
         self.panopto_section.load_from(cfg.panopto)
@@ -1661,7 +1661,7 @@ class SettingsWindow(QMainWindow):
         for key, value in row.picture().items():
             if key == "subtract_black" and value is True:
                 continue  # the default; don't pin it
-            if key == "processing" and value is False:
+            if key == "processing" and value is True:
                 continue  # the default; don't pin it
             data[key] = value
         return data

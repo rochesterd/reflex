@@ -5683,16 +5683,20 @@ tolerance 4 on top; 131 at 1.22 from a 15fps budget with 60ms exposure.
 OpenCV arithmetic: 16ms a frame for the whole raw path, 30fps held.
 Ghosting on hands moving in the beam is unmeasured; the slider goes to 1.
 
-**And a master switch, off by default.** Still "not bright enough" on
+**And a master switch, on by default.** Still "not bright enough" on
 the clinic PC, and the ask was a simple version to check against.
 `processing` (config) / "Apply Reflex's picture processing" (Preview)
 bypasses the whole host path and shows the camera's own conversion.
 Measured: off, the frame averages 38 (patch 108, background 30); on, 14
 (patch 118, background 0.7). Black removal takes the ~30-level pedestal
 off *everything*, so the picture reads three times darker even where the
-lit part is brighter -- that is the "way too dark". Off is the baseline
-the technician checks first; on is a comparison made with the picture
-in front of them, saved only if they leave it on.
+lit part is brighter -- that is the "way too dark". It shipped off for
+one build; the same day, measuring the scene itself settled it: at the
+camera port the face is 180x dimmer than the beam, 8 raw counts above
+black, below the floor's noise. No conversion shows what is not there,
+and the pedestal-as-grey look only hides that. So on is the default and
+off is the comparison, in Preview, with the picture in front of them;
+an explicit off is saved, an untouched on is not.
 
 **Why "for now":** CLAUDE.md's ownership table still stands -- a knob a
 technician can set wrong is worse than a value the app derives. These

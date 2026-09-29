@@ -135,9 +135,10 @@ class InstrumentConfig:
     # The master switch for everything Reflex does to the picture on the
     # host -- the tone curve, black removal, frame averaging. Off is the
     # camera's own conversion, exactly what the sensor delivers: the
-    # baseline a technician can check against. Off by default since
-    # 2026-09-29, until the processing has proved itself in the clinic.
-    processing: bool = False
+    # baseline a technician compares against in Preview. On by default:
+    # the beam-to-face contrast at the camera port is what the 12-bit
+    # path exists for (DECISIONS.md 2026-09-29).
+    processing: bool = True
 
 
 @dataclass
@@ -420,7 +421,7 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
         denoise_frames = _positive_int(path, f"instruments.{key}.denoise_frames", denoise_frames)
         if denoise_frames > 16:
             raise ConfigError(f"{path}: instruments.{key}.denoise_frames must be 1-16. {_FIX_HINT}")
-    processing = entry.get("processing", False)
+    processing = entry.get("processing", True)
     if not isinstance(processing, bool):
         raise ConfigError(f"{path}: instruments.{key}.processing must be true or false. {_FIX_HINT}")
     metering = _parse_optional_text(path, f"instruments.{key}.metering", entry.get("metering"))

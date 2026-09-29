@@ -103,14 +103,14 @@ That line is the whole check. Compare it against this:
 Normal gain depends on the instrument. The slit lamp should sit at 1–2x (its usable ceiling is ~3.3x of
 a 4x maximum; reaching it means too little light); the BIO's dimmer view runs in the teens of its 25x. Grain wants light, never gain.
 
-**If the picture is still too dark after Auto-Calibrate**, use the Preview's
-**Picture** box, applied live. With **Apply Reflex's picture processing** *unticked*
-(the default) you see the camera's own picture — get that right first: set
-**Auto-Calibrate exposes for** to *the whole view* and calibrate again; set **Frame
-rate this camera must keep** to 15 fps (twice the light, some blur on this view only)
-and calibrate again. Only then tick the processing on and compare: **Steady the dark
-tones** (frame averaging; turn it down if moving hands smear), **Dark tones**,
-**Shadow lift**, and **Remove the sensor's own black level**. Save keeps what you leave.
+**If the picture is still too dark after Auto-Calibrate**, first add light: the
+camera sees far less of the face than your eye does, and no setting invents it.
+Then use the Preview's **Picture** box, applied live: set **Auto-Calibrate exposes
+for** to *the whole view* and calibrate again; set **Frame rate this camera must keep**
+to 15 fps (twice the light, some blur on this view only) and calibrate again; raise
+**Steady the dark tones** (frame averaging; turn it down if moving hands smear); then
+**Dark tones** and **Shadow lift**. Untick **Apply Reflex's picture processing** to
+compare with the camera's own picture; leave it how it looks best. Save keeps what you leave.
 
 ### 6. Close Preview and repeat for the other instrument
 
