@@ -972,6 +972,7 @@ def _make_camera(
         shadow_tolerance=inst.shadow_tolerance,
         subtract_black=inst.subtract_black,
         denoise_frames=inst.denoise_frames,
+        host_processing=inst.processing,
     )
 
 

@@ -209,6 +209,7 @@ class IdsCamera(BaseCamera):
         shadow_tolerance: float | None = None,
         subtract_black: bool = True,
         denoise_frames: int | None = None,
+        host_processing: bool = True,
     ):
         super().__init__(queue_size=queue_size, label=serial, orientation=orientation)
         self._serial = serial
@@ -253,6 +254,9 @@ class IdsCamera(BaseCamera):
         # floor's noise at the current gain.
         self._denoise_frames = denoise_frames
         self._denoiser: TemporalDenoiser | None = None
+        # False bypasses the whole host path: no curve, no black removal,
+        # no averaging -- the camera's own conversion, the baseline.
+        self._host_processing = bool(host_processing)
         # The host-side curve as three per-channel lookup tables (R, G, B),
         # 12-bit raw in, 8-bit out -- see tone_curve.py. None means no host
         # curve: the frame goes through IDS's own conversion. Swapped whole,
@@ -676,6 +680,15 @@ class IdsCamera(BaseCamera):
         floor = floor_model_for_model(self._model_name)
         return int(floor.denoise_frames) if floor is not None else 1
 
+    def host_processing(self) -> bool:
+        return self._host_processing
+
+    def set_host_processing(self, enabled: bool) -> None:
+        """Live: the next frame is the camera's own picture, or Reflex's."""
+        self._host_processing = bool(enabled)
+        if self._node_map is not None:
+            self._apply_gamma()
+
     def default_metering(self) -> str:
         """What Auto-Calibrate meters for unless the technician chose."""
         return metering_for_model(self._model_name)
@@ -765,8 +778,11 @@ class IdsCamera(BaseCamera):
         measurements. Without a floor model the curve is a bare gamma
         with no black, which is what the corrector used to be.
         """
-        if abs(gamma - 1.0) < 1e-6:
+        if abs(gamma - 1.0) < 1e-6 or not self._host_processing:
             self._host_luts = None
+            self._denoiser = None
+            if not self._host_processing:
+                logger.info("%s: host processing off -- the camera's own picture", self.label)
             return
         full_scale = 4095
         floor = floor_model_for_model(self._model_name)

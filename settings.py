@@ -205,7 +205,7 @@ _GAIN_SLIDER_SCALE = 10  # QSlider is integer-only; gain is a small float (e.g. 
 _GAMMA_SLIDER_SCALE = 100
 _SHADOW_SLIDER_SCALE = 10
 PICTURE_FPS_CHOICES = (30, 25, 20, 15, 10)
-PICTURE_KEYS = ("gamma", "shadow_tolerance", "subtract_black", "min_fps", "denoise_frames", "metering")
+PICTURE_KEYS = ("gamma", "shadow_tolerance", "subtract_black", "min_fps", "denoise_frames", "metering", "processing")
 METERING_CHOICES = (("the beam (brightest part)", "highlight"), ("the whole view", "field"))
 
 
@@ -425,8 +425,19 @@ class PreviewDialog(QDialog):
         """Gamma, shadow tolerance, black subtraction and this camera's
         frame-rate budget, all applied live so the technician judges them
         on the picture. See DECISIONS.md 2026-09-29 for why these exist."""
-        box = QGroupBox("Picture (leave alone unless the preset looks wrong on this instrument)")
+        box = QGroupBox("Picture")
         inner = QVBoxLayout()
+
+        # Master switch first: everything below it is what Reflex does to
+        # the picture on the host. Off is the camera's own conversion --
+        # the thing to check first when a picture looks wrong.
+        self.processing_box = QCheckBox(
+            "Apply Reflex's picture processing (tone curve, black removal, frame averaging)"
+        )
+        self.processing_box.setChecked(bool(self._initial_picture.get("processing", False)))
+        self.processing_box.toggled.connect(self._on_processing_toggled)
+        inner.addWidget(self.processing_box)
+        self._processed_controls: list = []
 
         gamma = self._initial_picture.get("gamma")
         if gamma is None:
@@ -487,7 +498,24 @@ class PreviewDialog(QDialog):
 
         box.setLayout(inner)
         layout.addWidget(box)
+        # These only do anything with processing on; say so by greying them.
+        self._processed_controls = [
+            self.gamma_slider, self.gamma_value_label, self.shadow_slider, self.shadow_value_label,
+            self.subtract_black_box, self.denoise_slider, self.denoise_value_label,
+        ]
+        self._sync_processing_enabled()
         self._refresh_picture_labels()
+
+    def _on_processing_toggled(self, checked: bool) -> None:
+        if hasattr(self._camera, "set_host_processing"):
+            self._camera.set_host_processing(checked)
+        self.final_picture["processing"] = bool(checked)
+        self._sync_processing_enabled()
+
+    def _sync_processing_enabled(self) -> None:
+        on = self.processing_box.isChecked()
+        for widget in self._processed_controls:
+            widget.setEnabled(on)
 
     def _on_gamma_changed(self, value: int) -> None:
         gamma = value / _GAMMA_SLIDER_SCALE
@@ -1480,6 +1508,9 @@ class SettingsWindow(QMainWindow):
                     "shadow_tolerance": inst.shadow_tolerance,
                     "subtract_black": None if inst.subtract_black else False,
                     "min_fps": inst.min_fps,
+                    "denoise_frames": inst.denoise_frames,
+                    "metering": inst.metering,
+                    "processing": True if inst.processing else None,
                 })
         self._third_person_row.set_pending_selection(cfg.third_person.vid_pid)
         self.panopto_section.load_from(cfg.panopto)
@@ -1629,6 +1660,8 @@ class SettingsWindow(QMainWindow):
         # following the model preset, so a better preset later still lands.
         for key, value in row.picture().items():
             if key == "subtract_black" and value is True:
+                continue  # the default; don't pin it
+            if key == "processing" and value is False:
                 continue  # the default; don't pin it
             data[key] = value
         return data

@@ -801,5 +801,32 @@ class DenoiseAndMeteringConfigTest(unittest.TestCase):
                     load_config(self.path)
 
 
+
+class ProcessingSwitchTest(unittest.TestCase):
+    """Host processing is off unless a technician turned it on: the
+    camera's own picture is the baseline (DECISIONS.md 2026-09-29)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "config.json"
+
+    def _write(self, **slit_lamp) -> None:
+        data = json.loads(json.dumps(VALID))
+        data["instruments"]["slit_lamp"].update(slit_lamp)
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_off_by_default(self):
+        self._write()
+        self.assertFalse(load_config(self.path).instruments["slit_lamp"].processing)
+
+    def test_on_when_asked_and_only_a_bool(self):
+        self._write(processing=True)
+        self.assertTrue(load_config(self.path).instruments["slit_lamp"].processing)
+        self._write(processing="yes")
+        with self.assertRaises(ConfigError):
+            load_config(self.path)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -132,6 +132,12 @@ class InstrumentConfig:
     #   "highlight" (the beam) or "field" (the whole view); None the preset.
     denoise_frames: int | None = None
     metering: str | None = None
+    # The master switch for everything Reflex does to the picture on the
+    # host -- the tone curve, black removal, frame averaging. Off is the
+    # camera's own conversion, exactly what the sensor delivers: the
+    # baseline a technician can check against. Off by default since
+    # 2026-09-29, until the processing has proved itself in the clinic.
+    processing: bool = False
 
 
 @dataclass
@@ -414,6 +420,9 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
         denoise_frames = _positive_int(path, f"instruments.{key}.denoise_frames", denoise_frames)
         if denoise_frames > 16:
             raise ConfigError(f"{path}: instruments.{key}.denoise_frames must be 1-16. {_FIX_HINT}")
+    processing = entry.get("processing", False)
+    if not isinstance(processing, bool):
+        raise ConfigError(f"{path}: instruments.{key}.processing must be true or false. {_FIX_HINT}")
     metering = _parse_optional_text(path, f"instruments.{key}.metering", entry.get("metering"))
     if metering is not None and metering not in ("highlight", "field"):
         raise ConfigError(f"{path}: instruments.{key}.metering must be \"highlight\" or \"field\". {_FIX_HINT}")
@@ -433,6 +442,7 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
         min_fps=min_fps,
         denoise_frames=denoise_frames,
         metering=metering,
+        processing=processing,
     )
 
 

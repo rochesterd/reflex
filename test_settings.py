@@ -1074,6 +1074,9 @@ class _FakePictureCamera(_FakeCalibratableCamera):
     def default_metering(self) -> str:
         return "highlight"
 
+    def set_host_processing(self, enabled: bool):
+        self.writes.append(("processing", bool(enabled)))
+
     def auto_calibrate(self, **kwargs) -> bool:
         self.writes.append(("calibrate", kwargs.get("metering")))
         return super().auto_calibrate(**kwargs)
@@ -1173,6 +1176,41 @@ class DenoiseAndMeteringControlsTest(unittest.TestCase):
         dialog, _ = self._dialog(picture={"denoise_frames": 6, "metering": "field"})
         self.assertEqual(dialog.denoise_slider.value(), 6)
         self.assertEqual(dialog.metering_combo.currentData(), "field")
+
+
+class ProcessingSwitchControlTest(unittest.TestCase):
+    def _dialog(self, picture=None):
+        from settings import PreviewDialog
+
+        camera = _FakePictureCamera()
+        dialog = PreviewDialog(camera, "Slit Lamp", target_fps=30, initial_picture=picture)
+        self.addCleanup(dialog._shutdown)
+        return dialog, camera
+
+    def test_off_by_default_and_the_processed_controls_are_greyed(self):
+        dialog, camera = self._dialog()
+        self.assertFalse(dialog.processing_box.isChecked())
+        self.assertFalse(dialog.gamma_slider.isEnabled())
+        self.assertFalse(dialog.denoise_slider.isEnabled())
+        # The frame-rate budget and metering are not host processing.
+        self.assertTrue(dialog.fps_combo.isEnabled())
+        self.assertTrue(dialog.metering_combo.isEnabled())
+        self.assertEqual(dialog.final_picture, {})
+
+    def test_turning_it_on_is_live_and_enables_the_rest(self):
+        dialog, camera = self._dialog()
+        dialog.processing_box.setChecked(True)
+        self.assertEqual(camera.writes[-1], ("processing", True))
+        self.assertIs(dialog.final_picture["processing"], True)
+        self.assertTrue(dialog.gamma_slider.isEnabled())
+        dialog.processing_box.setChecked(False)
+        self.assertEqual(camera.writes[-1], ("processing", False))
+        self.assertFalse(dialog.gamma_slider.isEnabled())
+
+    def test_a_saved_on_comes_back_on(self):
+        dialog, _ = self._dialog(picture={"processing": True})
+        self.assertTrue(dialog.processing_box.isChecked())
+        self.assertTrue(dialog.shadow_slider.isEnabled())
 
 
 class PictureSaveTest(SettingsWindowTest):
