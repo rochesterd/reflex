@@ -960,10 +960,18 @@ def _make_camera(
         serial=inst.serial,
         exposure_time_us=inst.exposure_time_us,
         gain=inst.gain,
-        target_fps=target_fps,
+        # A technician may have given this camera its own exposure budget
+        # (config.InstrumentConfig.min_fps); the recording rate is the
+        # default. A slower instrument camera just has fewer frames on the
+        # shared clock -- the recorder's VFR files were built for that.
+        target_fps=inst.min_fps or target_fps,
         orientation=orientation,
         pixel_clock_hz=pixel_clock_hz,
         black_level=black_level,
+        gamma=inst.gamma,
+        shadow_tolerance=inst.shadow_tolerance,
+        subtract_black=inst.subtract_black,
+        denoise_frames=inst.denoise_frames,
     )
 
 

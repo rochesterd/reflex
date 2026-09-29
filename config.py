@@ -106,6 +106,32 @@ class InstrumentConfig:
     # presets this one is deliberately technician-overridable. None means
     # "use the model preset"; see DECISIONS.md.
     pixel_clock_hz: int | None = None
+    # The technician's picture overrides, set in settings.py's Preview with
+    # the live picture in front of them (DECISIONS.md 2026-09-29). Each
+    # None means "the model preset". Deliberately per instrument and
+    # deliberately temporary: a value that proves right for a room is a
+    # candidate for the preset, and CLAUDE.md's ownership table still
+    # applies -- these exist because the presets were measured on one
+    # scene and the clinic's are not it.
+    #
+    # `gamma`: the resting tone curve (1.0 straight, up to 2.4).
+    # `shadow_tolerance`: how much floor noise, in 8-bit levels, the host
+    #   curve may show before it stops lifting the darkest tones -- the
+    #   FloorModel's max_output_sigma. Higher is brighter and grainier.
+    # `subtract_black`: remove the sensor's measured pedestal first.
+    #   False shows the pedestal as grey, the way the 2026-09-17 build did.
+    # `min_fps`: this camera's own exposure budget. 30 keeps the recording
+    #   target; 15 doubles the light it may gather at the cost of motion
+    #   blur on *this* view only -- the hands are on the other camera.
+    gamma: float | None = None
+    shadow_tolerance: float | None = None
+    subtract_black: bool = True
+    min_fps: int | None = None
+    # `denoise_frames`: frames averaged on the host before the curve; 1 is
+    #   off, None the preset. `metering`: what Auto-Calibrate exposes for --
+    #   "highlight" (the beam) or "field" (the whole view); None the preset.
+    denoise_frames: int | None = None
+    metering: str | None = None
 
 
 @dataclass
@@ -241,10 +267,12 @@ def exposure_fps_warnings(config: "AppConfig") -> list[str]:
     what".
     """
     messages: list[str] = []
-    target = config.recording.fps
     for key, instrument in config.instruments.items():
         if instrument.exposure_time_us is None:
             continue
+        # A technician may have given this camera a lower budget on
+        # purpose (min_fps); the warning is about what *they* chose.
+        target = instrument.min_fps or config.recording.fps
         possible = achievable_fps(instrument.exposure_time_us)
         if possible < target:
             messages.append(
@@ -363,7 +391,32 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
     pixel_clock_hz = entry.get("pixel_clock_hz")
     if pixel_clock_hz is not None:
         pixel_clock_hz = _positive_int(path, f"instruments.{key}.pixel_clock_hz", pixel_clock_hz)
-
+    gamma = _parse_optional_positive_number(path, f"instruments.{key}.gamma", entry.get("gamma"))
+    if gamma is not None and not 0.3 <= gamma <= 3.0:
+        raise ConfigError(f"{path}: instruments.{key}.gamma must be between 0.3 and 3.0. {_FIX_HINT}")
+    shadow_tolerance = _parse_optional_positive_number(
+        path, f"instruments.{key}.shadow_tolerance", entry.get("shadow_tolerance")
+    )
+    if shadow_tolerance is not None and not 0.5 <= shadow_tolerance <= 16.0:
+        raise ConfigError(
+            f"{path}: instruments.{key}.shadow_tolerance must be between 0.5 and 16 (levels). {_FIX_HINT}"
+        )
+    subtract_black = entry.get("subtract_black", True)
+    if not isinstance(subtract_black, bool):
+        raise ConfigError(f"{path}: instruments.{key}.subtract_black must be true or false. {_FIX_HINT}")
+    min_fps = entry.get("min_fps")
+    if min_fps is not None:
+        min_fps = _positive_int(path, f"instruments.{key}.min_fps", min_fps)
+        if not 5 <= min_fps <= 60:
+            raise ConfigError(f"{path}: instruments.{key}.min_fps must be between 5 and 60. {_FIX_HINT}")
+    denoise_frames = entry.get("denoise_frames")
+    if denoise_frames is not None:
+        denoise_frames = _positive_int(path, f"instruments.{key}.denoise_frames", denoise_frames)
+        if denoise_frames > 16:
+            raise ConfigError(f"{path}: instruments.{key}.denoise_frames must be 1-16. {_FIX_HINT}")
+    metering = _parse_optional_text(path, f"instruments.{key}.metering", entry.get("metering"))
+    if metering is not None and metering not in ("highlight", "field"):
+        raise ConfigError(f"{path}: instruments.{key}.metering must be \"highlight\" or \"field\". {_FIX_HINT}")
     return InstrumentConfig(
         kind=kind,
         serial=serial,
@@ -374,6 +427,12 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
         gain=gain,
         orientation=orientation,
         pixel_clock_hz=pixel_clock_hz,
+        gamma=gamma,
+        shadow_tolerance=shadow_tolerance,
+        subtract_black=subtract_black,
+        min_fps=min_fps,
+        denoise_frames=denoise_frames,
+        metering=metering,
     )
 
 

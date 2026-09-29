@@ -725,5 +725,81 @@ class AudioConfigTest(unittest.TestCase):
                     load_config(self.path)
 
 
+
+class PictureOverridesTest(unittest.TestCase):
+    """The technician's per-instrument picture overrides (DECISIONS.md
+    2026-09-29): absent means the preset, present is range-checked."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "config.json"
+
+    def _write(self, **slit_lamp) -> None:
+        data = json.loads(json.dumps(VALID))
+        data["instruments"]["slit_lamp"].update(slit_lamp)
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_absent_means_the_presets(self):
+        self._write()
+        inst = load_config(self.path).instruments["slit_lamp"]
+        self.assertIsNone(inst.gamma)
+        self.assertIsNone(inst.shadow_tolerance)
+        self.assertTrue(inst.subtract_black)
+        self.assertIsNone(inst.min_fps)
+
+    def test_present_values_load(self):
+        self._write(gamma=1.4, shadow_tolerance=4.0, subtract_black=False, min_fps=15)
+        inst = load_config(self.path).instruments["slit_lamp"]
+        self.assertEqual((inst.gamma, inst.shadow_tolerance, inst.subtract_black, inst.min_fps), (1.4, 4.0, False, 15))
+
+    def test_out_of_range_values_are_rejected(self):
+        for bad in ({"gamma": 5.0}, {"gamma": 0.1}, {"shadow_tolerance": 0.1}, {"shadow_tolerance": 40},
+                    {"subtract_black": "no"}, {"min_fps": 2}, {"min_fps": 120}, {"min_fps": 15.5}):
+            with self.subTest(bad=bad):
+                self._write(**bad)
+                with self.assertRaises(ConfigError):
+                    load_config(self.path)
+
+    def test_the_fps_warning_uses_the_instruments_own_budget(self):
+        # 60ms is under a 15fps budget the technician chose; it would have
+        # warned against the 30fps recording rate.
+        self._write(exposure_time_us=60_000.0, min_fps=15)
+        cfg = load_config(self.path)
+        self.assertEqual([m for m in exposure_fps_warnings(cfg) if "Slit Lamp" in m], [])
+        self._write(exposure_time_us=60_000.0)
+        cfg = load_config(self.path)
+        self.assertTrue(any("Slit Lamp" in m for m in exposure_fps_warnings(cfg)))
+
+
+
+class DenoiseAndMeteringConfigTest(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "config.json"
+
+    def _write(self, **slit_lamp) -> None:
+        data = json.loads(json.dumps(VALID))
+        data["instruments"]["slit_lamp"].update(slit_lamp)
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_absent_means_the_preset(self):
+        self._write()
+        inst = load_config(self.path).instruments["slit_lamp"]
+        self.assertIsNone(inst.denoise_frames)
+        self.assertIsNone(inst.metering)
+
+    def test_values_load_and_are_range_checked(self):
+        self._write(denoise_frames=6, metering="field")
+        inst = load_config(self.path).instruments["slit_lamp"]
+        self.assertEqual((inst.denoise_frames, inst.metering), (6, "field"))
+        for bad in ({"denoise_frames": 0}, {"denoise_frames": 40}, {"metering": "average"}):
+            with self.subTest(bad=bad):
+                self._write(**bad)
+                with self.assertRaises(ConfigError):
+                    load_config(self.path)
+
+
 if __name__ == "__main__":
     unittest.main()

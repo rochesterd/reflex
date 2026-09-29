@@ -66,6 +66,10 @@ class FloorModel:
     # straight line. Sets the curve's toe slope at each gain, and the gain
     # above which no curve helps -- Auto-Calibrate's ceiling.
     max_output_sigma: float = 2.0
+    # Frames averaged on the host before the curve (tone_curve's
+    # TemporalDenoiser). 1 is off. Noise falls by about the square root,
+    # which is the headroom the curve needs to lift at gain 3.
+    denoise_frames: int = 1
 
     def black(self, gain: float, full_scale: int) -> tuple[float, float, float]:
         return tuple(
@@ -198,6 +202,9 @@ PROFILES: tuple[DeviceProfile, ...] = (
             sigma_slope=(0.00186, 0.00141, 0.00197),
             sigma_intercept=(0.00050, 0.00035, 0.00053),
             max_output_sigma=2.0,
+            # Four frames: sigma halves, so at gain 3 the curve may lift
+            # about 2x where it could not lift at all. Measured 2026-09-29.
+            denoise_frames=4,
         ),
         note="No auto-exposure of its own: calibrate it in Preview before first use.",
     ),

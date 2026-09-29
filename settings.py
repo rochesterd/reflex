@@ -25,6 +25,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QGridLayout,
@@ -198,6 +199,16 @@ _DEFAULT_PROTECT_DAYS = 7
 _GAIN_SLIDER_SCALE = 10  # QSlider is integer-only; gain is a small float (e.g. 1.0-24.0)
 
 
+# The picture controls' ranges. Gamma in hundredths (1.00-2.40, the
+# Brightness slider's own ceiling); shadow tolerance in tenths of a level
+# (0.5-16); the frame-rate budgets a technician may give one camera.
+_GAMMA_SLIDER_SCALE = 100
+_SHADOW_SLIDER_SCALE = 10
+PICTURE_FPS_CHOICES = (30, 25, 20, 15, 10)
+PICTURE_KEYS = ("gamma", "shadow_tolerance", "subtract_black", "min_fps", "denoise_frames", "metering")
+METERING_CHOICES = (("the beam (brightest part)", "highlight"), ("the whole view", "field"))
+
+
 class PreviewDialog(QDialog):
     """Single-camera live preview for whichever device is highlighted in a
     DeviceRow's dropdown -- opened modally (.exec(), not .show()) so a
@@ -227,8 +238,17 @@ class PreviewDialog(QDialog):
         initial_exposure_time_us: float | None = None,
         initial_gain: float | None = None,
         target_fps: float | None = None,
+        initial_picture: dict | None = None,
     ):
         super().__init__(parent)
+        # The technician's picture overrides for this instrument, as saved
+        # (config.InstrumentConfig's gamma / shadow_tolerance /
+        # subtract_black / min_fps). Only keys the technician actually
+        # moves in this dialog are written back, so an untouched control
+        # keeps following the model preset.
+        self._initial_picture = dict(initial_picture or {})
+        self.final_picture: dict = dict(self._initial_picture)
+        self.picture_supported = False
         # The recording frame rate this calibration has to fit inside.
         # Exposure is a frame-rate budget -- see exposure_calibration's
         # exposure_budget_us() and CLAUDE.md's camera-configuration table.
@@ -279,6 +299,9 @@ class PreviewDialog(QDialog):
         try:
             if self.calibration_supported:
                 self._build_exposure_gain_controls(layout, initial_exposure_time_us, initial_gain)
+            self.picture_supported = bool(getattr(camera, "supports_picture_controls", lambda: False)())
+            if self.picture_supported:
+                self._build_picture_controls(layout)
             layout.addWidget(self.calibration_status_label)
         except Exception:
             self._shutdown()
@@ -371,7 +394,8 @@ class PreviewDialog(QDialog):
         self.calibration_status_label.setText("Calibrating…")
         QApplication.processEvents()
         try:
-            converged = self._camera.auto_calibrate(target_fps=self._target_fps)
+            metering = self.final_picture.get("metering") if self.picture_supported else None
+            converged = self._camera.auto_calibrate(target_fps=self._target_fps, metering=metering)
         except Exception as exc:
             QMessageBox.warning(self, "Calibration failed", str(exc))
             converged = None
@@ -394,6 +418,125 @@ class PreviewDialog(QDialog):
                 "Couldn't reach target brightness automatically -- adjust the sliders by eye.   "
                 f"{self._calibration_cost()}"
             )
+
+    # -- the technician's picture controls -------------------------------
+
+    def _build_picture_controls(self, layout: QVBoxLayout) -> None:
+        """Gamma, shadow tolerance, black subtraction and this camera's
+        frame-rate budget, all applied live so the technician judges them
+        on the picture. See DECISIONS.md 2026-09-29 for why these exist."""
+        box = QGroupBox("Picture (leave alone unless the preset looks wrong on this instrument)")
+        inner = QVBoxLayout()
+
+        gamma = self._initial_picture.get("gamma")
+        if gamma is None:
+            gamma = float(getattr(self._camera, "resting_gamma", lambda: 1.0)())
+        self.gamma_slider, self.gamma_value_label = self._add_slider_row(
+            inner, "Shadow lift (gamma)", int(1.0 * _GAMMA_SLIDER_SCALE), int(2.4 * _GAMMA_SLIDER_SCALE),
+            int(round(gamma * _GAMMA_SLIDER_SCALE)),
+        )
+        self.gamma_slider.valueChanged.connect(self._on_gamma_changed)
+
+        tolerance = self._initial_picture.get("shadow_tolerance")
+        if tolerance is None:
+            tolerance = float(getattr(self._camera, "shadow_tolerance", lambda: 2.0)())
+        self.shadow_slider, self.shadow_value_label = self._add_slider_row(
+            inner, "Dark tones: clean ... bright", int(0.5 * _SHADOW_SLIDER_SCALE), int(16 * _SHADOW_SLIDER_SCALE),
+            int(round(tolerance * _SHADOW_SLIDER_SCALE)),
+        )
+        self.shadow_slider.valueChanged.connect(self._on_shadow_changed)
+
+        self.subtract_black_box = QCheckBox("Remove the sensor's own black level (off shows it as grey)")
+        self.subtract_black_box.setChecked(bool(self._initial_picture.get("subtract_black", True)))
+        self.subtract_black_box.toggled.connect(self._on_subtract_black_toggled)
+        inner.addWidget(self.subtract_black_box)
+
+        fps_row = QHBoxLayout()
+        fps_row.addWidget(QLabel("Frame rate this camera must keep"))
+        self.fps_combo = QComboBox()
+        for fps in PICTURE_FPS_CHOICES:
+            self.fps_combo.addItem(f"{fps} fps" + ("  (recording rate)" if fps == 30 else "  (more light, more blur)"), fps)
+        current = self._initial_picture.get("min_fps") or (int(self._target_fps) if self._target_fps else 30)
+        index = self.fps_combo.findData(current)
+        self.fps_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.fps_combo.currentIndexChanged.connect(self._on_fps_changed)
+        fps_row.addWidget(self.fps_combo)
+        fps_row.addStretch(1)
+        inner.addLayout(fps_row)
+
+        frames = self._initial_picture.get("denoise_frames")
+        if frames is None:
+            frames = int(getattr(self._camera, "denoise_frames", lambda: 1)())
+        self.denoise_slider, self.denoise_value_label = self._add_slider_row(
+            inner, "Steady the dark tones (frames averaged)", 1, 8, int(frames)
+        )
+        self.denoise_slider.valueChanged.connect(self._on_denoise_changed)
+
+        meter_row = QHBoxLayout()
+        meter_row.addWidget(QLabel("Auto-Calibrate exposes for"))
+        self.metering_combo = QComboBox()
+        for title, key in METERING_CHOICES:
+            self.metering_combo.addItem(title, key)
+        wanted = self._initial_picture.get("metering") or getattr(self._camera, "default_metering", lambda: None)()
+        index = self.metering_combo.findData(wanted)
+        self.metering_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.metering_combo.currentIndexChanged.connect(self._on_metering_changed)
+        meter_row.addWidget(self.metering_combo)
+        meter_row.addStretch(1)
+        inner.addLayout(meter_row)
+
+        box.setLayout(inner)
+        layout.addWidget(box)
+        self._refresh_picture_labels()
+
+    def _on_gamma_changed(self, value: int) -> None:
+        gamma = value / _GAMMA_SLIDER_SCALE
+        self._camera.set_resting_gamma(gamma)
+        self.final_picture["gamma"] = gamma
+        self._refresh_picture_labels()
+
+    def _on_shadow_changed(self, value: int) -> None:
+        tolerance = value / _SHADOW_SLIDER_SCALE
+        self._camera.set_shadow_tolerance(tolerance)
+        self.final_picture["shadow_tolerance"] = tolerance
+        self._refresh_picture_labels()
+        self._refresh_exposure_gain_labels()  # the gain ceiling moved with it
+
+    def _on_subtract_black_toggled(self, checked: bool) -> None:
+        self._camera.set_subtract_black(checked)
+        self.final_picture["subtract_black"] = bool(checked)
+
+    def _on_fps_changed(self, _index: int) -> None:
+        """A new exposure budget: the camera, the slider's ceiling and the
+        cost line all follow it, so the technician sees what it costs."""
+        fps = int(self.fps_combo.currentData())
+        self._target_fps = fps
+        self.final_picture["min_fps"] = fps
+        if hasattr(self._camera, "set_target_fps"):
+            self._camera.set_target_fps(fps)
+        if self.calibration_supported:
+            exposure_min, exposure_max = self._camera.exposure_time_range_us()
+            exposure_max = min(exposure_max, exposure_budget_us(fps))
+            self.exposure_slider.setRange(int(exposure_min), int(exposure_max))
+            if self._camera.get_exposure_time_us() > exposure_max:
+                self.exposure_slider.setValue(int(exposure_max))
+            self._refresh_exposure_gain_labels()
+
+    def _on_denoise_changed(self, value: int) -> None:
+        self._camera.set_denoise_frames(int(value))
+        self.final_picture["denoise_frames"] = int(value)
+        self._refresh_picture_labels()
+
+    def _on_metering_changed(self, _index: int) -> None:
+        """Takes effect at the next Auto-Calibrate, not live -- it is what
+        the calibration meters, not how the picture is drawn."""
+        self.final_picture["metering"] = self.metering_combo.currentData()
+
+    def _refresh_picture_labels(self) -> None:
+        self.gamma_value_label.setText(f"{self.gamma_slider.value() / _GAMMA_SLIDER_SCALE:.2f}")
+        self.shadow_value_label.setText(f"{self.shadow_slider.value() / _SHADOW_SLIDER_SCALE:.1f} levels of grain")
+        frames = self.denoise_slider.value()
+        self.denoise_value_label.setText("off" if frames <= 1 else f"{frames} frames (~{(frames - 1) * 33} ms to settle)")
 
     def _calibration_cost(self) -> str:
         """What the calibration actually bought, in units a technician can
@@ -516,6 +659,8 @@ class DeviceRow(QWidget):
         # auto-exposure never needing one.
         self._exposure_time_us: float | None = None
         self._gain: float | None = None
+        # The technician's picture overrides, as saved (only touched keys).
+        self._picture: dict = {}
         self._pending_profile: str | None | object = _UNSET
         # Set by set_candidates() when enumeration failed. Outranks the
         # row's own notes: "the scan broke" is what a technician has to act
@@ -652,6 +797,12 @@ class DeviceRow(QWidget):
         know lands on Custom, which is what it behaves as."""
         self._pending_profile = profile_id
 
+    def picture(self) -> dict:
+        return dict(self._picture)
+
+    def set_picture(self, picture: dict) -> None:
+        self._picture = {k: v for k, v in picture.items() if k in PICTURE_KEYS and v is not None}
+
     def calibration(self) -> tuple[float | None, float | None]:
         return self._exposure_time_us, self._gain
 
@@ -783,12 +934,16 @@ class DeviceRow(QWidget):
             parent=self,
             initial_exposure_time_us=self._exposure_time_us if self.supports_calibration else None,
             initial_gain=self._gain if self.supports_calibration else None,
-            target_fps=self.target_fps,
+            # This camera's own budget, when the technician gave it one.
+            target_fps=self._picture.get("min_fps") or self.target_fps,
+            initial_picture=self._picture,
         )
         dialog.exec()
         if self.supports_calibration and dialog.calibration_supported:
             self._exposure_time_us = dialog.final_exposure_time_us
             self._gain = dialog.final_gain
+        if dialog.picture_supported:
+            self.set_picture(dialog.final_picture)
         # Released only after its results are read. Qt parent-child
         # ownership would otherwise keep every Preview's window and its
         # pixmap alive for as long as Settings is open -- same reasoning as
@@ -1320,6 +1475,12 @@ class SettingsWindow(QMainWindow):
                 pending_key = inst.serial if inst.kind == "ids" else inst.kind
                 row.set_pending_selection(pending_key)
                 row.set_calibration(inst.exposure_time_us, inst.gain)
+                row.set_picture({
+                    "gamma": inst.gamma,
+                    "shadow_tolerance": inst.shadow_tolerance,
+                    "subtract_black": None if inst.subtract_black else False,
+                    "min_fps": inst.min_fps,
+                })
         self._third_person_row.set_pending_selection(cfg.third_person.vid_pid)
         self.panopto_section.load_from(cfg.panopto)
         self.streaming_section.load_from(cfg.streaming)
@@ -1464,6 +1625,12 @@ class SettingsWindow(QMainWindow):
             data["exposure_time_us"] = exposure_time_us
         if gain is not None:
             data["gain"] = gain
+        # Only what the technician touched: an untouched control keeps
+        # following the model preset, so a better preset later still lands.
+        for key, value in row.picture().items():
+            if key == "subtract_black" and value is True:
+                continue  # the default; don't pin it
+            data[key] = value
         return data
 
     def _existing_config_dict(self) -> dict:

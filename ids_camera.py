@@ -95,6 +95,7 @@ from device_presets import (
     pixel_clock_hz_for_model,
 )
 from tone_curve import (
+    TemporalDenoiser,
     ToneCurve,
     build_luts,
     floor_slope_for_noise,
@@ -205,6 +206,9 @@ class IdsCamera(BaseCamera):
         pixel_format: str | None = None,
         gamma: float | None = None,
         converge_auto: bool = True,
+        shadow_tolerance: float | None = None,
+        subtract_black: bool = True,
+        denoise_frames: int | None = None,
     ):
         super().__init__(queue_size=queue_size, label=serial, orientation=orientation)
         self._serial = serial
@@ -238,6 +242,17 @@ class IdsCamera(BaseCamera):
         # like orientation and black level. Applied on the camera when it
         # has a Gamma node, otherwise in _grab() by this corrector.
         self._gamma = gamma
+        # The technician's picture overrides (config.InstrumentConfig):
+        # how much floor noise the host curve may show before it stops
+        # lifting, and whether the sensor's pedestal is subtracted at all.
+        # None / True are the presets; both are live-settable from Preview.
+        self._shadow_tolerance = shadow_tolerance
+        self._subtract_black = subtract_black
+        # Frames averaged before the curve; None is the model preset. The
+        # denoiser is rebuilt with the curve, since its motion gate is the
+        # floor's noise at the current gain.
+        self._denoise_frames = denoise_frames
+        self._denoiser: TemporalDenoiser | None = None
         # The host-side curve as three per-channel lookup tables (R, G, B),
         # 12-bit raw in, 8-bit out -- see tone_curve.py. None means no host
         # curve: the frame goes through IDS's own conversion. Swapped whole,
@@ -330,6 +345,16 @@ class IdsCamera(BaseCamera):
             # real hardware: config.json's 30ms was applied correctly and
             # the camera still delivered 11.5fps, because the rate had
             # already been clamped to a stale 87ms exposure's 11.46 limit.
+            # First pass of the frame-rate cap, *before* exposure: on this
+            # sensor ExposureTime's Maximum() follows the current frame
+            # period, so a camera still holding a 30fps rate refuses the
+            # 60ms a 15fps budget allows. Lowering the rate first opens the
+            # exposure range (measured 2026-09-29: 33.3ms at 30fps, 66.6ms
+            # at 15, 100ms at 10); the second pass below re-caps against
+            # the exposure actually applied, which is the case the earlier
+            # comment describes.
+            if self._target_fps is not None:
+                self._apply_frame_rate_cap(self._target_fps)
             auto_converge_nodes = []
             if self._exposure_time_us is not None:
                 self._ensure_manual_exposure()
@@ -569,6 +594,8 @@ class IdsCamera(BaseCamera):
 
     def set_exposure_time_us(self, value: float) -> None:
         self._node_map.FindNode("ExposureTime").SetValue(value)
+        if self._denoiser is not None:
+            self._denoiser.reset()
 
     def exposure_time_range_us(self) -> tuple[float, float]:
         node = self._node_map.FindNode("ExposureTime")
@@ -598,8 +625,9 @@ class IdsCamera(BaseCamera):
         floor = floor_model_for_model(self._model_name)
         if floor is None:
             return gain_max
+        tolerance = self.shadow_tolerance()
         return min(
-            max_gain_for_noise(ks, cs, kb, cb, floor.max_output_sigma, gain_max)
+            max_gain_for_noise(ks, cs, kb, cb, tolerance, gain_max)
             for ks, cs, kb, cb in zip(
                 floor.sigma_slope, floor.sigma_intercept, floor.black_slope, floor.black_intercept
             )
@@ -614,6 +642,67 @@ class IdsCamera(BaseCamera):
     # Measured 2026-09-13 on the Keeler: gamma 2.4 raises the frame median
     # from 2 to roughly 28 while the highlight stays under 240. Linear in
     # amount, gamma being a perceptual curve already.
+    # -- the technician's picture controls (settings.py Preview) ---------
+
+    def supports_picture_controls(self) -> bool:
+        """Duck-typed by settings.py, like supports_manual_calibration()."""
+        return True
+
+    def resting_gamma(self) -> float:
+        """The curve at brightness 0: the override, else the model preset."""
+        return self._resting_gamma()
+
+    def set_resting_gamma(self, gamma: float | None) -> None:
+        """Override the model's resting curve (None restores the preset).
+        Re-armed immediately: on the camera's Gamma node when it has one,
+        on the host tables otherwise."""
+        self._gamma = gamma
+        if self._node_map is not None:
+            self._apply_gamma()
+
+    def set_shadow_tolerance(self, levels: float | None) -> None:
+        self._shadow_tolerance = levels
+        if self._node_map is not None and self._host_luts is not None:
+            self._set_host_gamma(self._resting_gamma())
+
+    def set_subtract_black(self, subtract: bool) -> None:
+        self._subtract_black = bool(subtract)
+        if self._node_map is not None and self._host_luts is not None:
+            self._set_host_gamma(self._resting_gamma())
+
+    def denoise_frames(self) -> int:
+        if self._denoise_frames is not None:
+            return max(1, int(self._denoise_frames))
+        floor = floor_model_for_model(self._model_name)
+        return int(floor.denoise_frames) if floor is not None else 1
+
+    def default_metering(self) -> str:
+        """What Auto-Calibrate meters for unless the technician chose."""
+        return metering_for_model(self._model_name)
+
+    def set_denoise_frames(self, frames: int | None) -> None:
+        self._denoise_frames = frames
+        if self._node_map is not None and self._host_luts is not None:
+            self._set_host_gamma(self._resting_gamma())
+
+    def set_target_fps(self, fps: float | None) -> None:
+        """This camera's exposure budget. Preview changes it live so its
+        slider and Auto-Calibrate follow; at open it clamps the config.
+        Applied to the camera at once, since the exposure range a caller
+        reads next is derived from the frame rate it is holding."""
+        self._target_fps = fps
+        if self._node_map is not None:
+            if fps is not None:
+                self._apply_frame_rate_cap(fps)
+            else:
+                self._release_frame_rate_cap()
+
+    def shadow_tolerance(self) -> float:
+        floor = floor_model_for_model(self._model_name)
+        if self._shadow_tolerance is not None:
+            return float(self._shadow_tolerance)
+        return float(floor.max_output_sigma) if floor is not None else 2.0
+
     _GAMMA_AT_FULL = 2.4
     # For a camera with no gamma: total light at amount 1.0, relative to
     # the technician's calibration. Spent on exposure up to the frame-rate
@@ -681,23 +770,38 @@ class IdsCamera(BaseCamera):
             return
         full_scale = 4095
         floor = floor_model_for_model(self._model_name)
+        # The floor was measured at the profile's black level. A config.json
+        # override moves the sensor's pedestal, and subtracting a black the
+        # sensor no longer adds crushes real signal to zero -- a picture that
+        # no exposure or gain can bring back. Better no subtraction than a
+        # wrong one; say so, since a technician can fix the file.
+        profile_black = black_level_for_model(self._model_name)
+        if floor is not None and self._black_level is not None and profile_black is not None                 and abs(float(self._black_level) - float(profile_black)) > 0.5:
+            logger.warning(
+                "%s: config.json black_level %.0f differs from the profile's %.0f the floor "
+                "was measured at; curving without black subtraction. Remove the override.",
+                self.label, self._black_level, profile_black,
+            )
+            floor = None
+        frames = self.denoise_frames()
         if floor is None:
             curve = ToneCurve(gamma=gamma, black=(0.0, 0.0, 0.0), floor_slope=64.0)
+            self._denoiser = None
         else:
             gain = self.get_gain()
-            black = floor.black(gain, full_scale)
-            sigma = floor.sigma(gain, full_scale)
-            # One slope for all three channels -- the noisiest decides --
-            # so a flat grey stays grey through the toe.
-            slope = min(
-                floor_slope_for_noise(sg, bk, full_scale, floor.max_output_sigma)
-                for sg, bk in zip(sigma, black)
+            curve = curve_for(
+                gamma, gain, floor, full_scale,
+                tolerance=self.shadow_tolerance(), subtract_black=self._subtract_black,
+                sigma_scale=1.0 / (frames ** 0.5),
             )
-            curve = ToneCurve(gamma=gamma, black=black, floor_slope=slope)
+            # The gate: three sigma of the noisiest channel at this gain,
+            # in raw counts. Anything changing by more is motion.
+            threshold = 3.0 * max(floor.sigma(gain, full_scale))
+            self._denoiser = TemporalDenoiser(frames, threshold) if frames > 1 else None
         self._host_luts = build_luts(curve)
         logger.info(
-            "%s: host tone curve, gamma %.2f, black R%.0f G%.0f B%.0f, floor slope %.2f",
-            self.label, curve.gamma, *curve.black, curve.floor_slope,
+            "%s: host tone curve, gamma %.2f, black R%.0f G%.0f B%.0f, floor slope %.2f, %d-frame average",
+            self.label, curve.gamma, *curve.black, curve.floor_slope, frames,
         )
 
     def _apply_light(self, amount: float) -> None:
@@ -1057,7 +1161,7 @@ class IdsCamera(BaseCamera):
         # frame on both real cameras.
         frame_id = buffer.FrameID()
         image = ids_peak_ipl.Image.from_image_view(buffer.ToImageView())
-        array = _to_bgr8(image, self._host_luts)
+        array = _to_bgr8(image, self._host_luts, self._denoiser)
         self._data_stream.QueueBuffer(buffer)
 
         return array, timestamp, frame_id
@@ -1078,7 +1182,35 @@ class IdsCamera(BaseCamera):
         )
 
 
-def _to_bgr8(image, luts=None) -> np.ndarray:
+def curve_for(
+    gamma: float,
+    gain: float,
+    floor,
+    full_scale: int,
+    *,
+    tolerance: float,
+    subtract_black: bool = True,
+    sigma_scale: float = 1.0,
+) -> ToneCurve:
+    """The tone curve for this gain from a measured floor. Pure, so the
+    decision is testable without a camera.
+
+    With the black subtracted, the toe's slope is set so the floor's noise
+    comes out at no more than `tolerance` levels. Without it the pedestal
+    shows as grey (the 2026-09-17 look) and the same tolerance bounds the
+    slope where the pedestal sits.
+    """
+    black = floor.black(gain, full_scale) if subtract_black else (0.0, 0.0, 0.0)
+    # Frame averaging divides the floor's noise by about sqrt(N); the toe
+    # is set for the noise that will actually reach the curve.
+    sigma = tuple(s * sigma_scale for s in floor.sigma(gain, full_scale))
+    # One slope for all three channels -- the noisiest decides -- so a
+    # flat grey stays grey through the toe.
+    slope = min(floor_slope_for_noise(sg, bk, full_scale, tolerance) for sg, bk in zip(sigma, black))
+    return ToneCurve(gamma=gamma, black=black, floor_slope=slope)
+
+
+def _to_bgr8(image, luts=None, denoiser=None) -> np.ndarray:
     """One captured Image as a BGR8 array.
 
     With `luts` (a 12-bit BayerRG capture and an armed host curve) the raw
@@ -1093,6 +1225,8 @@ def _to_bgr8(image, luts=None) -> np.ndarray:
     """
     if luts is not None and image.PixelFormat().PixelFormatName() == ids_peak_ipl.PixelFormatName_BayerRG12:
         raw = np.array(image.get_numpy_2D_16(), copy=True)
+        if denoiser is not None:
+            raw = denoiser.apply(raw)
         return raw_to_bgr8(raw, luts)
     converted = image.ConvertTo(ids_peak_ipl.PixelFormatName_BGR8)
     return converted.get_numpy_3D().copy()

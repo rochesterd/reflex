@@ -5646,3 +5646,61 @@ levels on the rod per 0.5, at 0.3 of flicker each (2.5: 52 at 1.61; 3.0:
 17th's "until seen on an eye" still stands for the gamma itself.
 
 ---
+
+## 2026-09-29 — Step back: the technician gets the picture controls, for now
+
+**Found:** on the clinic PC the slit lamp was "99% dark at maximum
+exposure and gain" after the 2026-09-21 curve. Traced on the dev machine
+with the same camera: the scene was starved -- calibrated at 26ms / 3.0x
+against the 3.8ms / 1.0x the curve was chosen on, twenty times less
+light -- and the new curve, refusing to lift a floor that noisy, showed
+that honestly where the old one had shown a lifted purple pedestal. The
+sliders could not help because Preview caps exposure at the 30fps budget
+and gain at 4x: 1.7x more light at most. And the 26ms was itself the
+sensor's exposure ceiling *at 30fps*: on this camera ExposureTime's
+Maximum follows the frame rate it is holding, so no software above the
+camera could ask for more.
+
+**Decision:** four per-instrument overrides in Preview, applied live to
+the picture and saved to config.json only when touched (an untouched
+control keeps following the model preset): the resting **gamma**; the
+**shadow tolerance** (`FloorModel.max_output_sigma`, how much floor noise
+the curve may show before it stops lifting); **subtract_black** off, which
+restores the pedestal-as-grey look; and **min_fps**, this camera's own
+exposure budget. Measured on the dev machine, same scene, gain 3: the
+lit patch reads 52 as shipped; 85 at tolerance 6 (flicker 1.8); 85 with
+black subtraction off (pedestal at 36); and **131 at a 15fps budget with
+60ms exposure, flicker 1.2** -- the clean answer, because it is light.
+
+To make min_fps real, `_open()` now applies the frame-rate cap *before*
+exposure as well as after: lowering the rate first raises the exposure
+ceiling (33.3ms at 30fps, 66.6ms at 15, 100ms at 10, measured), and the
+second pass re-caps against the exposure actually applied, which is the
+case the 2026-09-08 ordering was for. A slower instrument camera simply
+has fewer frames on the shared clock; the VFR recorder was built for it.
+The hands are on the other camera, which keeps 30fps.
+
+**And the two that close the gap to a phone's picture of the same rod.**
+A phone stacks frames and exposes for the face; Reflex did neither.
+`tone_curve.TemporalDenoiser` is a motion-gated running average on the raw
+frame before the curve: still pixels blend at 1/N, anything changing by
+more than three sigma of the floor snaps through, with a soft ramp so
+pixels at the gate don't flicker between the two. Noise falls by about
+the square root, which is the headroom the toe needs -- `curve_for()`
+sets the toe for sigma/sqrt(N). Measured, same scene, gain 3: the patch
+29 at 0.80 flicker without; **48 at 0.49 with four frames** (the slit
+lamp's preset), 55 at 0.41 with eight, 61 at 0.66 with four frames and
+tolerance 4. OpenCV arithmetic, not numpy: 24ms a frame became 9.6, and
+the whole raw path is 16ms at 1600x1200, 30fps held. Ghosting on hands
+moving in the beam is unmeasured here (nothing moved); the control is a
+slider in Preview, 1 is off. And Auto-Calibrate can now expose for **the
+whole view** instead of the beam (`metering`), the choice the BIO's
+profile already made; it takes effect at the next Auto-Calibrate.
+
+**Why "for now":** CLAUDE.md's ownership table still stands -- a knob a
+technician can set wrong is worse than a value the app derives. These
+exist because the presets were measured on one scene and the clinic's
+views are not it. Each value that proves right for a room is a candidate
+for the preset; when the presets are right, the controls should go.
+
+---

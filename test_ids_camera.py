@@ -111,5 +111,55 @@ class ToBgr8Test(unittest.TestCase):
         self.assertGreater(int(out.sum()), 0)
 
 
+
+class CurveForTest(unittest.TestCase):
+    """The pure decision behind the host curve: what the technician's
+    overrides do to it, without a camera."""
+
+    def setUp(self):
+        from device_presets import floor_model_for_model
+
+        self.floor = floor_model_for_model("UI325xCP-C")
+
+    def test_the_preset_tolerance_flattens_the_curve_at_gain_three(self):
+        from ids_camera import curve_for
+
+        curve = curve_for(1.8, 3.0, self.floor, 4095, tolerance=2.0)
+        self.assertLess(curve.floor_slope, 1.2)
+        self.assertGreater(curve.black[0], 500)
+
+    def test_a_looser_tolerance_lifts_more(self):
+        from ids_camera import curve_for
+
+        tight = curve_for(1.8, 3.0, self.floor, 4095, tolerance=2.0)
+        loose = curve_for(1.8, 3.0, self.floor, 4095, tolerance=6.0)
+        self.assertGreater(loose.floor_slope, 2.5 * tight.floor_slope)
+
+    def test_no_black_subtraction_keeps_the_pedestal(self):
+        from ids_camera import curve_for
+
+        curve = curve_for(1.8, 3.0, self.floor, 4095, tolerance=2.0, subtract_black=False)
+        self.assertEqual(curve.black, (0.0, 0.0, 0.0))
+
+    def test_low_gain_lifts_even_at_the_preset_tolerance(self):
+        from ids_camera import curve_for
+
+        curve = curve_for(1.8, 1.0, self.floor, 4095, tolerance=2.0)
+        self.assertGreater(curve.floor_slope, 2.5)
+
+
+
+class DenoiseHeadroomTest(unittest.TestCase):
+    def test_frame_averaging_lets_the_curve_lift_at_gain_three(self):
+        from device_presets import floor_model_for_model
+        from ids_camera import curve_for
+
+        floor = floor_model_for_model("UI325xCP-C")
+        plain = curve_for(1.8, 3.0, floor, 4095, tolerance=2.0)
+        averaged = curve_for(1.8, 3.0, floor, 4095, tolerance=2.0, sigma_scale=0.5)
+        self.assertLess(plain.floor_slope, 1.2)
+        self.assertGreater(averaged.floor_slope, 1.9)
+
+
 if __name__ == "__main__":
     unittest.main()

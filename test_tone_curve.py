@@ -13,6 +13,7 @@ import numpy as np
 
 from tone_curve import (
     MAX_FLOOR_SLOPE,
+    TemporalDenoiser,
     ToneCurve,
     apply_bayer,
     build_luts,
@@ -126,6 +127,63 @@ class NoiseAmplificationTest(unittest.TestCase):
         self.assertEqual(max_gain_for_noise(0.0001, 0.0, 0.01, 0.0, 2.0, 4.0), 4.0)
         # A hopeless one is clamped to unity, never below.
         self.assertEqual(max_gain_for_noise(0.5, 0.5, 0.01, 0.0, 2.0, 4.0), 1.0)
+
+
+class TemporalDenoiserTest(unittest.TestCase):
+    """Noise on a still scene averages down; a real change snaps through."""
+
+    def _noisy(self, level: float, sigma: float, frames: int, seed: int = 0) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        return np.clip(rng.normal(level, sigma, size=(frames, 64, 64)), 0, 4095).astype(np.uint16)
+
+    def test_off_returns_the_frame_untouched(self):
+        d = TemporalDenoiser(1, 75.0)
+        raw = self._noisy(600, 25, 1)[0]
+        self.assertIs(d.apply(raw), raw)
+        self.assertFalse(d.active)
+
+    def test_a_still_scene_gets_quieter_by_about_root_n(self):
+        d = TemporalDenoiser(4, 75.0)
+        stack = self._noisy(600, 25, 40)
+        outputs = [d.apply(f) for f in stack]
+        settled = np.stack(outputs[20:]).astype(np.float32)
+        raw_sigma = stack[20:].astype(np.float32).std(axis=0).mean()
+        out_sigma = settled.std(axis=0).mean()
+        self.assertLess(out_sigma, raw_sigma / 1.6)
+        self.assertGreater(out_sigma, raw_sigma / 4.5)  # not implausibly clean either
+        self.assertAlmostEqual(float(settled.mean()), 600.0, delta=3.0)
+
+    def test_a_step_change_snaps_through_in_one_frame(self):
+        d = TemporalDenoiser(8, 75.0)
+        for f in self._noisy(600, 10, 10):
+            d.apply(f)
+        bright = self._noisy(1400, 10, 1)[0]  # +800 raw: motion, not noise
+        out = d.apply(bright)
+        self.assertAlmostEqual(float(out.mean()), 1400.0, delta=15.0)
+
+    def test_a_change_below_the_gate_is_blended_not_snapped(self):
+        d = TemporalDenoiser(8, 75.0)
+        for f in self._noisy(600, 1, 10):
+            d.apply(f)
+        out = d.apply(self._noisy(640, 1, 1)[0])  # +40: under the 75 gate
+        self.assertGreater(float(out.mean()), 600.0)
+        self.assertLess(float(out.mean()), 620.0)
+
+    def test_reset_forgets_the_history(self):
+        d = TemporalDenoiser(8, 75.0)
+        for f in self._noisy(600, 1, 5):
+            d.apply(f)
+        d.reset()
+        out = d.apply(self._noisy(640, 1, 1)[0])
+        self.assertAlmostEqual(float(out.mean()), 640.0, delta=2.0)
+
+    def test_output_keeps_dtype_and_shape(self):
+        d = TemporalDenoiser(4, 75.0)
+        raw = self._noisy(600, 25, 2)
+        d.apply(raw[0])
+        out = d.apply(raw[1])
+        self.assertEqual(out.dtype, np.uint16)
+        self.assertEqual(out.shape, raw[1].shape)
 
 
 class BayerTest(unittest.TestCase):

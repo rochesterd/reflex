@@ -68,9 +68,10 @@ keep the numbers in the DECISIONS entry.
   chosen on a matte-black focus rod, the Keeler's 1.5 on skin. Check each
   on an eye / a fundus; `tools/measure_picture.py <serial> gamma ...
   --calibrate` re-sweeps one in seconds. No recalibration is needed after
-  a change: Auto-Calibrate meters with the curve off. The one number to
-  revisit on the slit lamp is `FloorModel.max_output_sigma` (2.0), the
-  noise the toe tolerates; 2.5 buys ~6 levels of lift for 0.3 of flicker.
+  a change: Auto-Calibrate meters with the curve off. The Preview's
+  Picture controls (DECISIONS 2026-09-29) are the instrument for this:
+  whatever gamma, shadow tolerance and frame-rate budget prove right in
+  the clinic become the presets, and the controls then come out again.
 - **Hands camera exposure.** Today the two-second warmup's result is frozen,
   so every session starts from whatever the room looked like. Have
   `settings.py` record the converged value at calibration time and

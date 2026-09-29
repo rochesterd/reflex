@@ -1027,6 +1027,174 @@ class _FakeCalibratableCamera(SyntheticCamera):
         self._gain = 3.0
         return True
 
+class _FakePictureCamera(_FakeCalibratableCamera):
+    """Adds the picture controls IdsCamera offers (duck-typed by
+    PreviewDialog), recording every live write."""
+
+    def __init__(self):
+        super().__init__()
+        self.writes: list[tuple] = []
+        self._gamma = 1.8
+        self._tolerance = 2.0
+        self._target_fps = 30
+
+    def supports_picture_controls(self) -> bool:
+        return True
+
+    def exposure_time_range_us(self) -> tuple[float, float]:
+        return (100.0, 200_000.0)  # wide, so the frame-rate budget is what binds
+
+    def resting_gamma(self) -> float:
+        return self._gamma
+
+    def set_resting_gamma(self, gamma):
+        self._gamma = gamma
+        self.writes.append(("gamma", gamma))
+
+    def shadow_tolerance(self) -> float:
+        return self._tolerance
+
+    def set_shadow_tolerance(self, levels):
+        self._tolerance = levels
+        self.writes.append(("shadow_tolerance", levels))
+
+    def set_subtract_black(self, subtract: bool):
+        self.writes.append(("subtract_black", subtract))
+
+    def set_target_fps(self, fps):
+        self._target_fps = fps
+        self.writes.append(("target_fps", fps))
+
+    def denoise_frames(self) -> int:
+        return 4
+
+    def set_denoise_frames(self, frames):
+        self.writes.append(("denoise_frames", frames))
+
+    def default_metering(self) -> str:
+        return "highlight"
+
+    def auto_calibrate(self, **kwargs) -> bool:
+        self.writes.append(("calibrate", kwargs.get("metering")))
+        return super().auto_calibrate(**kwargs)
+
+
+class PictureControlsTest(unittest.TestCase):
+    """The technician's picture overrides in Preview: live on the camera,
+    and only what was touched comes back to be saved."""
+
+    def _dialog(self, camera=None, picture=None):
+        from settings import PreviewDialog
+
+        camera = camera or _FakePictureCamera()
+        dialog = PreviewDialog(camera, "Slit Lamp", target_fps=30, initial_picture=picture)
+        self.addCleanup(dialog._shutdown)
+        return dialog, camera
+
+    def test_controls_appear_only_for_a_camera_that_offers_them(self):
+        dialog, _ = self._dialog(camera=_FakeCalibratableCamera())
+        self.assertFalse(dialog.picture_supported)
+        dialog, _ = self._dialog()
+        self.assertTrue(dialog.picture_supported)
+        self.assertEqual(dialog.gamma_slider.value(), 180)  # the camera's resting gamma
+
+    def test_an_untouched_dialog_writes_nothing_back(self):
+        dialog, camera = self._dialog()
+        self.assertEqual(dialog.final_picture, {})
+        self.assertEqual(camera.writes, [])
+
+    def test_each_control_is_live_and_records_only_its_own_key(self):
+        dialog, camera = self._dialog()
+        dialog.gamma_slider.setValue(140)
+        self.assertEqual(camera.writes[-1], ("gamma", 1.4))
+        self.assertEqual(dialog.final_picture, {"gamma": 1.4})
+
+        dialog.shadow_slider.setValue(60)
+        self.assertEqual(camera.writes[-1], ("shadow_tolerance", 6.0))
+        self.assertEqual(dialog.final_picture["shadow_tolerance"], 6.0)
+
+        dialog.subtract_black_box.setChecked(False)
+        self.assertEqual(camera.writes[-1], ("subtract_black", False))
+        self.assertIs(dialog.final_picture["subtract_black"], False)
+
+    def test_a_lower_frame_rate_widens_the_exposure_slider_and_the_cost_line(self):
+        dialog, camera = self._dialog()
+        before = dialog.exposure_slider.maximum()
+        dialog.fps_combo.setCurrentIndex(dialog.fps_combo.findData(15))
+        self.assertEqual(camera.writes[-1], ("target_fps", 15))
+        self.assertEqual(dialog.final_picture["min_fps"], 15)
+        from exposure_calibration import exposure_budget_us
+
+        self.assertEqual(before, int(exposure_budget_us(30)))
+        self.assertEqual(dialog.exposure_slider.maximum(), int(exposure_budget_us(15)))
+        camera.set_exposure_time_us(80_000.0)  # 12.5fps: below the new 15fps budget, not the old 30
+        self.assertIn("BELOW the 15fps", dialog._calibration_cost())
+
+    def test_saved_overrides_come_back_as_the_starting_point(self):
+        dialog, _ = self._dialog(picture={"gamma": 1.4, "shadow_tolerance": 6.0, "subtract_black": False, "min_fps": 15})
+        self.assertEqual(dialog.gamma_slider.value(), 140)
+        self.assertEqual(dialog.shadow_slider.value(), 60)
+        self.assertFalse(dialog.subtract_black_box.isChecked())
+        self.assertEqual(dialog.fps_combo.currentData(), 15)
+
+
+class DenoiseAndMeteringControlsTest(unittest.TestCase):
+    def _dialog(self, picture=None):
+        from settings import PreviewDialog
+
+        camera = _FakePictureCamera()
+        dialog = PreviewDialog(camera, "Slit Lamp", target_fps=30, initial_picture=picture)
+        self.addCleanup(dialog._shutdown)
+        return dialog, camera
+
+    def test_frame_averaging_starts_at_the_preset_and_writes_live(self):
+        dialog, camera = self._dialog()
+        self.assertEqual(dialog.denoise_slider.value(), 4)
+        self.assertIn("4 frames", dialog.denoise_value_label.text())
+        dialog.denoise_slider.setValue(1)
+        self.assertEqual(camera.writes[-1], ("denoise_frames", 1))
+        self.assertEqual(dialog.final_picture["denoise_frames"], 1)
+        self.assertEqual(dialog.denoise_value_label.text(), "off")
+
+    def test_metering_choice_reaches_auto_calibrate(self):
+        dialog, camera = self._dialog()
+        self.assertEqual(dialog.metering_combo.currentData(), "highlight")
+        with patch("settings.QApplication.processEvents"):
+            dialog._on_calibrate_clicked()
+        self.assertIn(("calibrate", None), camera.writes)  # untouched: the camera's own default
+
+        dialog.metering_combo.setCurrentIndex(dialog.metering_combo.findData("field"))
+        with patch("settings.QApplication.processEvents"):
+            dialog._on_calibrate_clicked()
+        self.assertIn(("calibrate", "field"), camera.writes)
+        self.assertEqual(dialog.final_picture["metering"], "field")
+
+    def test_saved_values_come_back(self):
+        dialog, _ = self._dialog(picture={"denoise_frames": 6, "metering": "field"})
+        self.assertEqual(dialog.denoise_slider.value(), 6)
+        self.assertEqual(dialog.metering_combo.currentData(), "field")
+
+
+class PictureSaveTest(SettingsWindowTest):
+    def test_only_touched_picture_keys_are_written_and_reload(self):
+        window = self._make_window(ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE])
+        for key, device in (("slit_lamp", SLIT_LAMP_DEVICE), ("bio", BIO_DEVICE)):
+            window._instrument_rows[key].set_pending_selection(device.serial)
+        window._third_person_row.set_pending_selection(THIRD_PERSON_DEVICE.vid_pid)
+        window.rescan()
+        window._instrument_rows["slit_lamp"].set_picture({"gamma": 1.4, "min_fps": 15, "subtract_black": True})
+        window._on_save_clicked()
+
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))["instruments"]["slit_lamp"]
+        self.assertEqual(saved.get("gamma"), 1.4)
+        self.assertEqual(saved.get("min_fps"), 15)
+        self.assertNotIn("subtract_black", saved)  # the default is not pinned
+        self.assertNotIn("shadow_tolerance", saved)
+
+        reopened = self._make_window(ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE])
+        self.assertEqual(reopened._instrument_rows["slit_lamp"].picture(), {"gamma": 1.4, "min_fps": 15})
+
+
 class CalibrationCostReportingTest(unittest.TestCase):
     """A calibration must report what it *cost*, not just that it worked.
 

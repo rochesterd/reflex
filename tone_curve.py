@@ -170,3 +170,64 @@ def floor_slope_for_noise(sigma_raw: float, black: float, full_scale: int, max_o
     if straight <= 0.0:
         return MAX_FLOOR_SLOPE
     return float(max(1.0, min(MAX_FLOOR_SLOPE, max_output_sigma / straight)))
+
+
+class TemporalDenoiser:
+    """Motion-gated frame averaging on the raw Bayer frame, before the curve.
+
+    What a phone does to a dim scene, in the simplest form that works: keep
+    a running average of the frame, blend each new frame into it, and let
+    any pixel that has *really* changed snap to its new value instead of
+    being dragged there over several frames. Noise averages down by about
+    the square root of the window; edges that move -- a hand, a swept beam
+    -- pass straight through, so they do not ghost.
+
+    The gate is the floor's own noise at the current gain: a change of
+    more than `threshold` raw counts is treated as motion. Below it the
+    pixel blends at 1/frames; above it, a soft ramp lets big changes
+    through at once and mid-size ones quickly. Soft rather than a hard
+    switch, because a hard one makes pixels near the threshold flicker
+    between "averaged" and "raw" -- the artefact this exists to remove.
+
+    State is one float32 frame. reset() drops it -- the camera calls that
+    when exposure or gain change, since the pedestal moves with them.
+    """
+
+    def __init__(self, frames: int, threshold: float):
+        self.frames = max(1, int(frames))
+        self.threshold = max(1.0, float(threshold))
+        self._accum: np.ndarray | None = None
+        self._scratch: np.ndarray | None = None
+        self._weight: np.ndarray | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.frames > 1
+
+    def reset(self) -> None:
+        self._accum = None
+
+    def apply(self, raw: np.ndarray) -> np.ndarray:
+        """The averaged frame, same dtype and shape as `raw`.
+
+        OpenCV arithmetic rather than numpy: the same eight passes over a
+        1600x1200 frame, but vectorised and multi-threaded -- 24ms a frame
+        in numpy, about a third of that here (measured 2026-09-29)."""
+        if self.frames <= 1:
+            return raw
+        if self._accum is None or self._accum.shape != raw.shape:
+            self._accum = raw.astype(np.float32)
+            self._scratch = np.empty_like(self._accum)
+            self._weight = np.empty_like(self._accum)
+            return raw
+        current = raw.astype(np.float32)
+        delta = cv2.subtract(current, self._accum, dst=self._scratch)  # current - accum
+        weight = cv2.absdiff(current, self._accum, dst=self._weight)
+        # (|delta| - t) / t, clipped to [0, 1], floored at 1/N.
+        cv2.subtract(weight, self.threshold, dst=weight)
+        cv2.multiply(weight, 1.0 / self.threshold, dst=weight)
+        cv2.min(weight, 1.0, dst=weight)
+        cv2.max(weight, 1.0 / self.frames, dst=weight)
+        cv2.multiply(delta, weight, dst=delta)
+        cv2.add(self._accum, delta, dst=self._accum)
+        return np.rint(self._accum).astype(raw.dtype)

@@ -101,9 +101,11 @@ Answers to what this section used to list as unknown. See DECISIONS.md's
   arrives with the same 248 distinct levels as an 8-bit one. The extra bits
   are only worth anything if a tone curve is applied *before* that
   conversion, which `ids_camera._to_bgr8()` now does.
-- **The host tone curve** (`tone_curve.py`: per-channel 12-bit lookup
-  tables plus a host demosaic, 9.3ms a frame at 1600x1200): a 12-bit
-  capture keeps 77 distinct shadow steps where an 8-bit one keeps 40.
+- **The host raw path** (`tone_curve.py`: motion-gated frame averaging,
+  per-channel 12-bit lookup tables, host demosaic): 16ms a frame at
+  1600x1200 with a 4-frame average, 9.3ms without. A 12-bit capture keeps
+  77 distinct shadow steps where an 8-bit one keeps 40; four frames
+  averaged cut the floor's noise by ~3x on a still scene.
 - **The slit lamp's floor, dark frame 2026-09-21, gains 1-4:** black is
   R 117 / G 90 / B 125 of 4095 at gain 1 and rises ~204 / 153 / 216 per
   unit of gain; temporal sigma rises ~7.6 / 5.8 / 8.1 per unit of gain;

@@ -5,10 +5,9 @@ run. Takes about 15 minutes for a two-instrument room. No imaging or
 photography knowledge is needed — everything you have to judge is written
 on screen in plain numbers.
 
-Do this **at the instruments**, with them switched on and set up the way a
-student will actually use them. That is the whole reason this step exists:
-the app records what the camera sees, and it can only be set up correctly
-against a real view.
+Do this **at the instruments**, switched on and set up the way a student
+will use them: the app records what the camera sees, and it can only be
+set up correctly against a real view.
 
 You need:
 
@@ -104,20 +103,27 @@ That line is the whole check. Compare it against this:
 Normal gain depends on the instrument. The slit lamp should sit at 1–2x (its usable ceiling is ~3.3x of
 a 4x maximum; reaching it means too little light); the BIO's dimmer view runs in the teens of its 25x. Grain wants light, never gain.
 
+**If the picture is still too dark after Auto-Calibrate**, the Preview's
+**Picture** box has four controls, applied live. Try them in this order and
+stop as soon as it looks right: raise **Steady the dark tones** (averages frames:
+less grain, brighter shadows; turn it down if moving hands smear); set
+**Auto-Calibrate exposes for** to *the whole view* and calibrate again; set **Frame
+rate this camera must keep** to 15 fps (twice the light, some blur on this view only)
+and calibrate again; move **Dark tones** toward bright; raise **Shadow lift**. Untick
+**Remove the sensor's own black level** only if a dark background should read grey.
+
 ### 6. Close Preview and repeat for the other instrument
 
 Close the Preview window. Repeat steps 3–5 for the second instrument.
 
-On the older BIO there is no Auto-Calibrate button and no sliders — that's
-expected. Just check the picture and the focus, and close.
+The older BIO has no Auto-Calibrate and no sliders: check picture and focus, and close.
 
 ### 7. Save
 
 Press **Save**. Nothing you did in Preview is stored until you do.
 
-Save refuses if the same camera is assigned to two roles, and warns you if
-a role is left empty — an empty role means students won't see that
-instrument at all.
+Save refuses if one camera is assigned to two roles, and warns if a role
+is empty — an empty role means students won't see that instrument.
 
 ### 8. Restart the recorder, with the room in its normal state
 
@@ -125,9 +131,8 @@ Close Settings and start the recorder app from its Desktop shortcut.
 
 **Have the room lit normally and the third-person camera aimed at the
 student's working position before you launch it.** That camera fixes its
-own exposure in the first couple of seconds and then holds it for the whole
-session. If the room lighting changes a lot later (blinds opened, lights
-switched off), restart the app.
+own exposure in its first couple of seconds and holds it all session; if
+the room lighting changes a lot later, restart the app.
 
 ### 9. Do one real test recording
 
@@ -136,26 +141,22 @@ This is the step that actually proves the install:
 1. Pick an instrument. The status line should start with **Ready. Press
    Start Recording.**
 2. **Glance at both panes before you press Start Recording.** They're live.
-   If the instrument pane is black, its illumination is off or turned right
-   down — the app won't stop you, and you'd record a black pane. This is the
-   one check left to the eye, because a black picture is the most obvious
-   thing on screen; worth passing on to instructors to tell students.
+   A black instrument pane means its illumination is off — the app won't
+   stop you. This is the one check left to the eye; tell instructors.
 3. Press **Start Recording**, and spend 20–30 seconds doing the real
    skill — hands moving, beam moving.
 4. Press **Stop Recording**. The recording opens by itself; closing it
    unexported asks whether to save or discard.
 5. Check both panes: right way up, in focus, bright enough to see what the
    hands and the optics are doing, and moving smoothly.
-6. With a USB drive plugged in, press **Export video...** and save to it.
-   This is how students keep a recording, so it is part of the test. With
-   two drives plugged in it asks which one first.
+6. With a USB drive plugged in, press **Export video...** and save to it —
+   how students keep a recording, so it is part of the test.
 
 Repeat for the second instrument. If both play back well, the room is
 ready.
 
-**Tell instructors this:** Reflex keeps nothing. A recording lives only
-until the app is closed, and a student who does not Export loses it. The
-app asks, but the habit is what matters.
+**Tell instructors:** Reflex keeps nothing. A recording lives only until
+the app is closed; a student who does not Export loses it.
 
 ---
 
@@ -180,6 +181,5 @@ Re-run the whole procedure whenever:
 - An instrument's illumination is serviced, or its bulb is changed.
 - The room's lighting is changed substantially.
 
-Settings is a normal, repeatable tool, not a one-time installer — running
-it again is always safe. Re-doing a calibration costs a couple of minutes;
-a stale one costs students recordings they can't use.
+Settings is a normal, repeatable tool; running it again is always safe. A
+recalibration costs minutes; a stale one costs students recordings.

@@ -82,14 +82,14 @@ DECISIONS.md's "Camera configuration: which layer owns what" entry.
 | Keeler / Haag-Streit | the **optics** — light path, image orientation, how much light reaches the sensor at all | can't be configured; compensate in `device_presets.py`, or improve the instrument's own illumination |
 | IDS | sensor capability, generic defaults, and **which features exist at all** — the transport layer decides: the uEye one (slit lamp) publishes no auto exposure/gain/white balance, the USB3 Vision one (Keeler) publishes all three | defaults are a starting point, not an answer. IDS peak Cockpit stays the expert tool for sensor-level work (black level, pixel format) — don't reimplement it |
 | Developer | the answers, once known | `device_presets.py` for per-model facts; hard constraints belong in the algorithm, not a settings dialog |
-| Technician | *this room's* light | `settings.py` → `config.json`, one action per decision |
+| Technician | *this room's* light; for now also the picture overrides | `settings.py` → `config.json`, one action per decision |
 | Student | nothing | already true — keep it that way |
 
 Rules that follow from this:
 
 - **Push decisions up the table; don't add an "Advanced" tab.** A knob a
   technician can set wrong is worse than a value the app derives. An
-  advanced panel is usually a sign a preset hasn't been decided yet.
+  advanced panel usually means a preset hasn't been decided yet.
 - **The app holds the values, the camera doesn't.** GenICam cameras
   persist `ExposureTime`/`Gain` across power cycles, so "set it once in
   Cockpit" appears to work — but that is invisible, unversioned state that
@@ -98,10 +98,10 @@ Rules that follow from this:
 - **Report what a calibration cost, not just that it succeeded.** A
   technician with no imaging background can judge "30fps, gain 2.6× of
   4.0 max"; nobody can judge "87208.816".
-- **Exposure time is a frame-rate budget.** Anything above
-  `1/recording.fps` costs frame rate *and* adds motion blur to exactly
-  the motion this app exists to record. That is a constraint, not a
-  preference — it belongs in code.
+- **Exposure time is a frame-rate budget.** Above `1/fps` it costs frame
+  rate *and* adds motion blur. It belongs in code; the one override is a
+  per-instrument `min_fps` a technician sets with the picture in front of
+  them (DECISIONS 2026-09-29).
 - **Check what actually gates a limit before designing around it.** A
   limit that appears in two places at once is worth one query to the
   device before it becomes an assumption — the slit lamp's "11 fps limit"
