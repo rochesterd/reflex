@@ -745,13 +745,13 @@ class PictureOverridesTest(unittest.TestCase):
         inst = load_config(self.path).instruments["slit_lamp"]
         self.assertIsNone(inst.gamma)
         self.assertIsNone(inst.shadow_tolerance)
-        self.assertTrue(inst.subtract_black)
+        self.assertFalse(inst.subtract_black)  # the pedestal stays, neutral
         self.assertIsNone(inst.min_fps)
 
     def test_present_values_load(self):
-        self._write(gamma=1.4, shadow_tolerance=4.0, subtract_black=False, min_fps=15)
+        self._write(gamma=1.4, shadow_tolerance=4.0, subtract_black=True, min_fps=15)
         inst = load_config(self.path).instruments["slit_lamp"]
-        self.assertEqual((inst.gamma, inst.shadow_tolerance, inst.subtract_black, inst.min_fps), (1.4, 4.0, False, 15))
+        self.assertEqual((inst.gamma, inst.shadow_tolerance, inst.subtract_black, inst.min_fps), (1.4, 4.0, True, 15))
 
     def test_out_of_range_values_are_rejected(self):
         for bad in ({"gamma": 5.0}, {"gamma": 0.1}, {"shadow_tolerance": 0.1}, {"shadow_tolerance": 40},

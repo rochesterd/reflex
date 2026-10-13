@@ -457,8 +457,10 @@ class PreviewDialog(QDialog):
         )
         self.shadow_slider.valueChanged.connect(self._on_shadow_changed)
 
-        self.subtract_black_box = QCheckBox("Remove the sensor's own black level (off shows it as grey)")
-        self.subtract_black_box.setChecked(bool(self._initial_picture.get("subtract_black", True)))
+        self.subtract_black_box = QCheckBox(
+            "Remove the sensor's own black level (a dark background reads black; off, a neutral grey)"
+        )
+        self.subtract_black_box.setChecked(bool(self._initial_picture.get("subtract_black", False)))
         self.subtract_black_box.toggled.connect(self._on_subtract_black_toggled)
         inner.addWidget(self.subtract_black_box)
 
@@ -1506,7 +1508,7 @@ class SettingsWindow(QMainWindow):
                 row.set_picture({
                     "gamma": inst.gamma,
                     "shadow_tolerance": inst.shadow_tolerance,
-                    "subtract_black": None if inst.subtract_black else False,
+                    "subtract_black": True if inst.subtract_black else None,
                     "min_fps": inst.min_fps,
                     "denoise_frames": inst.denoise_frames,
                     "metering": inst.metering,
@@ -1659,7 +1661,7 @@ class SettingsWindow(QMainWindow):
         # Only what the technician touched: an untouched control keeps
         # following the model preset, so a better preset later still lands.
         for key, value in row.picture().items():
-            if key == "subtract_black" and value is True:
+            if key == "subtract_black" and value is False:
                 continue  # the default; don't pin it
             if key == "processing" and value is True:
                 continue  # the default; don't pin it

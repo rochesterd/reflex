@@ -124,7 +124,7 @@ class CurveForTest(unittest.TestCase):
     def test_the_preset_tolerance_flattens_the_curve_at_gain_three(self):
         from ids_camera import curve_for
 
-        curve = curve_for(1.8, 3.0, self.floor, 4095, tolerance=2.0)
+        curve = curve_for(1.8, 3.0, self.floor, 4095, tolerance=2.0, subtract_black=True)
         self.assertLess(curve.floor_slope, 1.2)
         self.assertGreater(curve.black[0], 500)
 
@@ -135,11 +135,18 @@ class CurveForTest(unittest.TestCase):
         loose = curve_for(1.8, 3.0, self.floor, 4095, tolerance=6.0)
         self.assertGreater(loose.floor_slope, 2.5 * tight.floor_slope)
 
-    def test_no_black_subtraction_keeps_the_pedestal(self):
+    def test_no_black_subtraction_keeps_the_pedestal_but_neutral(self):
+        """The level stays (the three offsets sum to zero) and the tint
+        goes (each channel lands on the mean black)."""
         from ids_camera import curve_for
 
         curve = curve_for(1.8, 3.0, self.floor, 4095, tolerance=2.0, subtract_black=False)
-        self.assertEqual(curve.black, (0.0, 0.0, 0.0))
+        measured = self.floor.black(3.0, 4095)
+        self.assertAlmostEqual(sum(curve.black), 0.0, places=6)
+        for offset, black in zip(curve.black, measured):
+            self.assertAlmostEqual(black - offset, sum(measured) / 3.0, places=6)
+        full = curve_for(1.8, 3.0, self.floor, 4095, tolerance=2.0, subtract_black=True)
+        self.assertEqual(full.black, measured)
 
     def test_low_gain_lifts_even_at_the_preset_tolerance(self):
         from ids_camera import curve_for
@@ -160,6 +167,35 @@ class DenoiseHeadroomTest(unittest.TestCase):
         self.assertLess(plain.floor_slope, 1.2)
         self.assertGreater(averaged.floor_slope, 1.9)
 
+
+
+@unittest.skipIf(ids_peak_ipl is None, "IDS peak bindings not installed")
+class GainLatencyHoldTest(unittest.TestCase):
+    """A table built at a gain write waits GAIN_LATENCY_FRAMES grabs before
+    _grab() uses it, so frames still at the old gain keep the old table;
+    an immediate rebuild cancels the wait."""
+
+    def _camera(self):
+        camera = IdsCamera(serial="unused")
+        camera._host_luts, camera._denoiser = "old", None
+        return camera
+
+    def test_held_for_the_measured_latency_then_applied(self):
+        from ids_camera import GAIN_LATENCY_FRAMES
+
+        camera = self._camera()
+        camera._pending_curve = (("new", None), GAIN_LATENCY_FRAMES)
+        seen = [camera._current_host_curve()[0] for _ in range(GAIN_LATENCY_FRAMES + 2)]
+        self.assertEqual(seen, ["old"] * GAIN_LATENCY_FRAMES + ["new", "new"])
+        self.assertIsNone(camera._pending_curve)
+
+    def test_an_immediate_rebuild_cancels_the_pending_table(self):
+        camera = self._camera()
+        camera._pending_curve = (("new", None), 2)
+        camera._host_processing = False
+        camera._set_host_gamma(1.8)  # processing off: disarms now
+        self.assertIsNone(camera._pending_curve)
+        self.assertEqual(camera._current_host_curve(), (None, None))
 
 if __name__ == "__main__":
     unittest.main()

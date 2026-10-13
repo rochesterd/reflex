@@ -5705,3 +5705,47 @@ views are not it. Each value that proves right becomes a preset; when
 the presets are right, the controls should go.
 
 ---
+
+## 2026-10-13 — The floor stays, as a neutral grey; a gain write's table waits for its frames
+
+**Found:** "when I lower the brightness it looks right for a frame or two,
+then settles back to too dark." Measured on the slit lamp: a Gain write
+reaches the sensor's output 2 or 3 grabs later (twelve trials at random
+phases: 1 once, 2 five times, 3 four times, 4 twice). `set_gain()` rebuilt the host table for the new gain at once, so
+those frames, still at the old, higher gain, went through a table that
+subtracted a smaller black. The leftover pedestal lifted the whole shadow
+region into a dim grey and the rod's surround came with it: median 49 of
+255, against 2 in the steady state before and 0 after. Then the sensor
+caught up, the subtraction became exact, and the shadows went back to a
+void. In the other direction (brightness up) the same lag crushes two
+frames to black -- a flash recorded into the instrument stream on every
+throttled write of a slider drag.
+
+**Decision, the picture:** `subtract_black` defaults to **off**, and off
+now means *neutral*: each channel is moved to the three channels' mean
+black, so the floor's purple goes but its level stays. The pedestal reads
+as a dim grey floor instead of black, exactly the level of the frames
+the developer called right (neutral rendering of the same raw frame:
+median 53). It is also the level of the 2026-09-17 build, which was
+"roughly the right brightness" -- that look minus its tint and its grain
+(four-frame averaging stays). The honest reason it looks better: on this
+scene the face is below the floor's noise, and noise on a grey floor
+reads as a dim room where the same noise clipped against black reads as
+nothing. Black subtraction stays one tick away in Preview for a room
+where a black background should read black; an explicit *on* is what
+Save pins.
+
+**Decision, the glitch:** a table built at a gain write is held in
+`_pending_curve` and applied by `_grab()` after `GAIN_LATENCY_FRAMES`
+grabs; any immediate rebuild (gamma, tolerance, processing off) cancels
+it. A 2-frame hold leaves the fewest off frames over the
+measured spread (8 in twelve writes, against 9 for a 3-frame hold and 31
+for none), so a drag may still show a single off frame; it no longer
+shows two or three on every write.
+
+**Still true:** the 2026-09-29 measurement stands. At the camera port the
+face is 180x dimmer than the beam, eight raw counts above black. A grey
+floor makes that read as dim rather than absent; only light makes it
+visible. Test with a model eye or skin, with the room's light on it.
+
+---

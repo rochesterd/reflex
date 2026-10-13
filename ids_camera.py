@@ -114,6 +114,13 @@ from exposure_calibration import (
 
 logger = logging.getLogger(__name__)
 
+# Grabs between a Gain write and the first frame exposed at the new gain,
+# slit lamp at 30fps, twelve trials at random phases of the frame period
+# (2026-10-13): 1 once, 2 five times, 3 four times, 4 twice. A table for
+# the new gain is held back this many frames -- the fewest off frames per
+# write; the spread means a single one can remain.
+GAIN_LATENCY_FRAMES = 2
+
 # Comfortably under BaseCamera.stop()'s 2.0s thread-join timeout, so a
 # stop() call isn't left waiting on a blocked _grab().
 _ACQUISITION_TIMEOUT_MS = 1000
@@ -207,7 +214,7 @@ class IdsCamera(BaseCamera):
         gamma: float | None = None,
         converge_auto: bool = True,
         shadow_tolerance: float | None = None,
-        subtract_black: bool = True,
+        subtract_black: bool = False,
         denoise_frames: int | None = None,
         host_processing: bool = True,
     ):
@@ -262,6 +269,12 @@ class IdsCamera(BaseCamera):
         # curve: the frame goes through IDS's own conversion. Swapped whole,
         # never mutated: _grab() reads this reference from its thread.
         self._host_luts = None
+        # A table built for a gain the sensor has not reached yet: the
+        # sensor's output changes GAIN_LATENCY_FRAMES grabs after the write
+        # (measured), and a table applied before that subtracts a black the
+        # frame does not have -- a flash on every slider move. _grab()
+        # counts it down. Cleared by any immediate rebuild.
+        self._pending_curve: tuple[tuple, int] | None = None
         # Per-instrument calibrated values from config.json (InstrumentConfig's
         # optional exposure_time_us/gain fields) -- see DECISIONS.md's
         # 2026-08-25 calibration entry. None means "let _converge_auto_nodes()
@@ -612,8 +625,22 @@ class IdsCamera(BaseCamera):
         self._node_map.FindNode("Gain").SetValue(value)
         # The floor and its noise scale with gain, and so must what the
         # host curve subtracts and how far it lifts -- see _set_host_gamma().
+        # Built now, applied when the frames at this gain arrive.
         if self._host_luts is not None:
-            self._set_host_gamma(self._resting_gamma())
+            self._pending_curve = (self._build_host_curve(self._resting_gamma()), GAIN_LATENCY_FRAMES)
+
+    def _current_host_curve(self) -> tuple:
+        """What _grab() applies to this frame: the armed table, or the
+        pending one once the sensor has caught up with the gain write."""
+        pending = self._pending_curve
+        if pending is not None:
+            built, remaining = pending
+            if remaining <= 0:
+                self._host_luts, self._denoiser = built
+                self._pending_curve = None
+            else:
+                self._pending_curve = (built, remaining - 1)
+        return self._host_luts, self._denoiser
 
     def gain_range(self) -> tuple[float, float]:
         node = self._node_map.FindNode("Gain")
@@ -767,8 +794,14 @@ class IdsCamera(BaseCamera):
         return True
 
     def _set_host_gamma(self, gamma: float) -> None:
-        """Arm (or disarm, at 1.0) the host-side tone curve _grab() applies
-        to the raw 12-bit frame, in place of IDS's conversion.
+        """Arm (or disarm, at 1.0) the host-side tone curve, now."""
+        self._pending_curve = None
+        self._host_luts, self._denoiser = self._build_host_curve(gamma)
+
+    def _build_host_curve(self, gamma: float) -> tuple:
+        """The host-side tone curve _grab() applies to the raw 12-bit frame,
+        in place of IDS's conversion, as (luts, denoiser) -- (None, None)
+        disarms it.
 
         Built from the model's measured floor (device_presets.FloorModel)
         at the *current* gain: each channel's black is subtracted so the
@@ -779,11 +812,9 @@ class IdsCamera(BaseCamera):
         with no black, which is what the corrector used to be.
         """
         if abs(gamma - 1.0) < 1e-6 or not self._host_processing:
-            self._host_luts = None
-            self._denoiser = None
             if not self._host_processing:
                 logger.info("%s: host processing off -- the camera's own picture", self.label)
-            return
+            return None, None
         full_scale = 4095
         floor = floor_model_for_model(self._model_name)
         # The floor was measured at the profile's black level. A config.json
@@ -800,9 +831,9 @@ class IdsCamera(BaseCamera):
             )
             floor = None
         frames = self.denoise_frames()
+        denoiser = None
         if floor is None:
             curve = ToneCurve(gamma=gamma, black=(0.0, 0.0, 0.0), floor_slope=64.0)
-            self._denoiser = None
         else:
             gain = self.get_gain()
             curve = curve_for(
@@ -813,12 +844,12 @@ class IdsCamera(BaseCamera):
             # The gate: three sigma of the noisiest channel at this gain,
             # in raw counts. Anything changing by more is motion.
             threshold = 3.0 * max(floor.sigma(gain, full_scale))
-            self._denoiser = TemporalDenoiser(frames, threshold) if frames > 1 else None
-        self._host_luts = build_luts(curve)
+            denoiser = TemporalDenoiser(frames, threshold) if frames > 1 else None
         logger.info(
             "%s: host tone curve, gamma %.2f, black R%.0f G%.0f B%.0f, floor slope %.2f, %d-frame average",
             self.label, curve.gamma, *curve.black, curve.floor_slope, frames,
         )
+        return build_luts(curve), denoiser
 
     def _apply_light(self, amount: float) -> None:
         """No tone curve on this camera: spend light instead, exposure first."""
@@ -1177,7 +1208,7 @@ class IdsCamera(BaseCamera):
         # frame on both real cameras.
         frame_id = buffer.FrameID()
         image = ids_peak_ipl.Image.from_image_view(buffer.ToImageView())
-        array = _to_bgr8(image, self._host_luts, self._denoiser)
+        array = _to_bgr8(image, *self._current_host_curve())
         self._data_stream.QueueBuffer(buffer)
 
         return array, timestamp, frame_id
@@ -1205,7 +1236,7 @@ def curve_for(
     full_scale: int,
     *,
     tolerance: float,
-    subtract_black: bool = True,
+    subtract_black: bool = False,
     sigma_scale: float = 1.0,
 ) -> ToneCurve:
     """The tone curve for this gain from a measured floor. Pure, so the
@@ -1213,10 +1244,17 @@ def curve_for(
 
     With the black subtracted, the toe's slope is set so the floor's noise
     comes out at no more than `tolerance` levels. Without it the pedestal
-    shows as grey (the 2026-09-17 look) and the same tolerance bounds the
-    slope where the pedestal sits.
+    stays, at its level, as a *neutral* grey: each channel is moved to the
+    three channels' mean black, so the floor's tint goes and its height
+    does not -- the 2026-09-17 look without the purple (DECISIONS.md
+    2026-10-13). The same tolerance bounds the slope where it sits.
     """
-    black = floor.black(gain, full_scale) if subtract_black else (0.0, 0.0, 0.0)
+    measured = floor.black(gain, full_scale)
+    if subtract_black:
+        black = measured
+    else:
+        mean = sum(measured) / 3.0
+        black = tuple(b - mean for b in measured)
     # Frame averaging divides the floor's noise by about sqrt(N); the toe
     # is set for the noise that will actually reach the curve.
     sigma = tuple(s * sigma_scale for s in floor.sigma(gain, full_scale))

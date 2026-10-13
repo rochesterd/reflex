@@ -118,14 +118,16 @@ class InstrumentConfig:
     # `shadow_tolerance`: how much floor noise, in 8-bit levels, the host
     #   curve may show before it stops lifting the darkest tones -- the
     #   FloorModel's max_output_sigma. Higher is brighter and grainier.
-    # `subtract_black`: remove the sensor's measured pedestal first.
-    #   False shows the pedestal as grey, the way the 2026-09-17 build did.
+    # `subtract_black`: remove the sensor's measured pedestal, so a dark
+    #   background reads black. False (the default) keeps it as a neutral
+    #   grey, the level the 2026-09-17 build showed, without its tint
+    #   (DECISIONS.md 2026-10-13).
     # `min_fps`: this camera's own exposure budget. 30 keeps the recording
     #   target; 15 doubles the light it may gather at the cost of motion
     #   blur on *this* view only -- the hands are on the other camera.
     gamma: float | None = None
     shadow_tolerance: float | None = None
-    subtract_black: bool = True
+    subtract_black: bool = False
     min_fps: int | None = None
     # `denoise_frames`: frames averaged on the host before the curve; 1 is
     #   off, None the preset. `metering`: what Auto-Calibrate exposes for --
@@ -408,7 +410,7 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
         raise ConfigError(
             f"{path}: instruments.{key}.shadow_tolerance must be between 0.5 and 16 (levels). {_FIX_HINT}"
         )
-    subtract_black = entry.get("subtract_black", True)
+    subtract_black = entry.get("subtract_black", False)
     if not isinstance(subtract_black, bool):
         raise ConfigError(f"{path}: instruments.{key}.subtract_black must be true or false. {_FIX_HINT}")
     min_fps = entry.get("min_fps")

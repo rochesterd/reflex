@@ -1116,9 +1116,9 @@ class PictureControlsTest(unittest.TestCase):
         self.assertEqual(camera.writes[-1], ("shadow_tolerance", 6.0))
         self.assertEqual(dialog.final_picture["shadow_tolerance"], 6.0)
 
-        dialog.subtract_black_box.setChecked(False)
-        self.assertEqual(camera.writes[-1], ("subtract_black", False))
-        self.assertIs(dialog.final_picture["subtract_black"], False)
+        dialog.subtract_black_box.setChecked(True)
+        self.assertEqual(camera.writes[-1], ("subtract_black", True))
+        self.assertIs(dialog.final_picture["subtract_black"], True)
 
     def test_a_lower_frame_rate_widens_the_exposure_slider_and_the_cost_line(self):
         dialog, camera = self._dialog()
@@ -1134,10 +1134,10 @@ class PictureControlsTest(unittest.TestCase):
         self.assertIn("BELOW the 15fps", dialog._calibration_cost())
 
     def test_saved_overrides_come_back_as_the_starting_point(self):
-        dialog, _ = self._dialog(picture={"gamma": 1.4, "shadow_tolerance": 6.0, "subtract_black": False, "min_fps": 15})
+        dialog, _ = self._dialog(picture={"gamma": 1.4, "shadow_tolerance": 6.0, "subtract_black": True, "min_fps": 15})
         self.assertEqual(dialog.gamma_slider.value(), 140)
         self.assertEqual(dialog.shadow_slider.value(), 60)
-        self.assertFalse(dialog.subtract_black_box.isChecked())
+        self.assertTrue(dialog.subtract_black_box.isChecked())
         self.assertEqual(dialog.fps_combo.currentData(), 15)
 
 
@@ -1220,7 +1220,7 @@ class PictureSaveTest(SettingsWindowTest):
             window._instrument_rows[key].set_pending_selection(device.serial)
         window._third_person_row.set_pending_selection(THIRD_PERSON_DEVICE.vid_pid)
         window.rescan()
-        window._instrument_rows["slit_lamp"].set_picture({"gamma": 1.4, "min_fps": 15, "subtract_black": True})
+        window._instrument_rows["slit_lamp"].set_picture({"gamma": 1.4, "min_fps": 15, "subtract_black": False})
         window._on_save_clicked()
 
         saved = json.loads(self.config_path.read_text(encoding="utf-8"))["instruments"]["slit_lamp"]
