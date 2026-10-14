@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from app_icon import ICON_SETTINGS, icon_path
-from camera import BaseCamera
+from camera import BaseCamera, ControlAutoError
 from compositor import LAYOUT_MODES, LAYOUT_TITLES, fit_into_canvas
 from config import (
     DEFAULT_CONFIG_PATH,
@@ -102,7 +102,8 @@ def _default_make_ids_camera(candidate: RowCandidate) -> BaseCamera:
 
 
 def _default_make_uvc_camera(candidate: RowCandidate) -> BaseCamera:
-    return UvcCamera(device=candidate.preview_target, name="preview")
+    # Ranges probed, so Preview can size the sliders; the kiosk never asks.
+    return UvcCamera(device=candidate.preview_target, name="preview", probe_controls=True)
 
 
 def _default_make_net2860_winusb_camera(_candidate: RowCandidate) -> BaseCamera:
@@ -239,8 +240,17 @@ class PreviewDialog(QDialog):
         initial_gain: float | None = None,
         target_fps: float | None = None,
         initial_picture: dict | None = None,
+        initial_controls: dict | None = None,
     ):
         super().__init__(parent)
+        # The camera's own levers (camera.ControlSpec), as saved. Unlike the
+        # picture overrides these are the camera's whole state for that
+        # lever, so the dialog hands back the full set: a Default press
+        # removes a key, everything else the technician left is kept.
+        self._initial_controls = dict(initial_controls or {})
+        self.final_controls: dict = dict(self._initial_controls)
+        self.controls_supported = False
+        self._control_rows: dict = {}
         # The technician's picture overrides for this instrument, as saved
         # (config.InstrumentConfig's gamma / shadow_tolerance /
         # subtract_black / min_fps). Only keys the technician actually
@@ -302,6 +312,7 @@ class PreviewDialog(QDialog):
             self.picture_supported = bool(getattr(camera, "supports_picture_controls", lambda: False)())
             if self.picture_supported:
                 self._build_picture_controls(layout)
+            self._build_camera_controls(layout)
             layout.addWidget(self.calibration_status_label)
         except Exception:
             self._shutdown()
@@ -508,6 +519,115 @@ class PreviewDialog(QDialog):
         self._sync_processing_enabled()
         self._refresh_picture_labels()
 
+    def _build_camera_controls(self, layout: QVBoxLayout) -> None:
+        """The camera's own levers: per group a heading, a slider per lever,
+        an Auto button when the camera can judge that group itself, and
+        Default to hand it back to the camera. The saved values are applied
+        first, so the sliders open where the kiosk will."""
+        try:
+            for key, value in self._initial_controls.items():
+                self._camera.set_control(key, value)
+        except Exception as exc:  # a saved key this camera lacks, or the device refused
+            logger.warning("Preview: could not apply saved camera controls: %s", exc)
+        try:
+            specs = self._camera.controls() if self._camera is not None else []
+        except Exception as exc:
+            logger.warning("Preview: camera controls unavailable: %s", exc)
+            specs = []
+        if not specs:
+            return
+        self.controls_supported = True
+        groups: dict[str, list] = {}
+        for spec in specs:
+            groups.setdefault(spec.group, []).append(spec)
+        for group, members in groups.items():
+            box = QGroupBox(group)
+            inner = QVBoxLayout()
+            for spec in members:
+                slider, value_label = self._add_slider_row(
+                    inner, spec.label, 0, self._control_position(spec, spec.maximum),
+                    self._control_position(spec, spec.value),
+                )
+                self._control_rows[spec.key] = (spec, slider, value_label)
+                slider.valueChanged.connect(lambda pos, key=spec.key: self._on_control_moved(key, pos))
+                value_label.setText(self._control_text(spec, spec.value))
+                if spec.host_processing and hasattr(self, "_processed_controls"):
+                    self._processed_controls += [slider, value_label]
+            buttons = QHBoxLayout()
+            buttons.addStretch(1)
+            if any(spec.auto for spec in members):
+                auto_button = QPushButton("Auto")
+                hint = next((s.auto_hint for s in members if s.auto_hint), "")
+                if hint:
+                    auto_button.setToolTip(hint)
+                auto_button.clicked.connect(lambda _=False, g=group: self._on_control_auto(g))
+                buttons.addWidget(auto_button)
+                self._control_rows[f"auto:{group}"] = auto_button
+            default_button = QPushButton("Default")
+            default_button.clicked.connect(lambda _=False, g=group: self._on_control_default(g))
+            buttons.addWidget(default_button)
+            inner.addLayout(buttons)
+            box.setLayout(inner)
+            layout.addWidget(box)
+        if hasattr(self, "_processed_controls"):
+            self._sync_processing_enabled()
+
+    @staticmethod
+    def _control_position(spec, value: float) -> int:
+        return int(round((value - spec.minimum) / spec.step))
+
+    @staticmethod
+    def _control_text(spec, value: float) -> str:
+        if spec.unit == "log2 s":  # DirectShow exposure: say it in milliseconds
+            return f"{1000.0 * 2.0 ** value:.1f} ms"
+        text = f"{value:.{spec.decimals}f}"
+        return f"{text} {spec.unit}".strip()
+
+    def _on_control_moved(self, key: str, position: int) -> None:
+        spec, _slider, value_label = self._control_rows[key]
+        wanted = spec.minimum + position * spec.step
+        applied = self._camera.set_control(key, wanted)
+        self.final_controls[key] = applied
+        value_label.setText(self._control_text(spec, applied))
+
+    def _show_control_values(self, values: dict) -> None:
+        """Move sliders to what the camera now holds, without writing back."""
+        for key, value in values.items():
+            row = self._control_rows.get(key)
+            if row is None:
+                continue
+            spec, slider, value_label = row
+            slider.blockSignals(True)
+            slider.setValue(self._control_position(spec, value))
+            slider.blockSignals(False)
+            value_label.setText(self._control_text(spec, value))
+
+    def _on_control_auto(self, group: str) -> None:
+        self.calibration_status_label.setText(f"{group}: adjusting…")
+        QApplication.processEvents()
+        try:
+            values = self._camera.auto_controls(group)
+        except ControlAutoError as exc:
+            self.calibration_status_label.setText(f"{group}: {exc}")
+            return
+        self.final_controls.update(values)
+        self._show_control_values(values)
+        shown = ", ".join(
+            f"{self._control_rows[k][0].label.lower()} {self._control_text(self._control_rows[k][0], v)}"
+            for k, v in values.items() if k in self._control_rows
+        )
+        self.calibration_status_label.setText(f"{group} set: {shown}.")
+
+    def _on_control_default(self, group: str) -> None:
+        self._camera.reset_controls(group)
+        keys = [k for k, row in self._control_rows.items()
+                if not k.startswith("auto:") and row[0].group == group]
+        for key in keys:
+            self.final_controls.pop(key, None)
+        current = {spec.key: spec.value for spec in self._camera.controls() if spec.key in keys}
+        self._show_control_values(current)
+        self.calibration_status_label.setText(f"{group}: back to the camera's default.")
+
     def _on_processing_toggled(self, checked: bool) -> None:
         if hasattr(self._camera, "set_host_processing"):
             self._camera.set_host_processing(checked)
@@ -691,6 +811,8 @@ class DeviceRow(QWidget):
         self._gain: float | None = None
         # The technician's picture overrides, as saved (only touched keys).
         self._picture: dict = {}
+        # The camera's own levers, as saved -- see PreviewDialog.
+        self._controls: dict = {}
         self._pending_profile: str | None | object = _UNSET
         # Set by set_candidates() when enumeration failed. Outranks the
         # row's own notes: "the scan broke" is what a technician has to act
@@ -833,6 +955,12 @@ class DeviceRow(QWidget):
     def set_picture(self, picture: dict) -> None:
         self._picture = {k: v for k, v in picture.items() if k in PICTURE_KEYS and v is not None}
 
+    def controls(self) -> dict:
+        return dict(self._controls)
+
+    def set_controls(self, controls: dict) -> None:
+        self._controls = dict(controls or {})
+
     def calibration(self) -> tuple[float | None, float | None]:
         return self._exposure_time_us, self._gain
 
@@ -967,6 +1095,7 @@ class DeviceRow(QWidget):
             # This camera's own budget, when the technician gave it one.
             target_fps=self._picture.get("min_fps") or self.target_fps,
             initial_picture=self._picture,
+            initial_controls=self._controls,
         )
         dialog.exec()
         if self.supports_calibration and dialog.calibration_supported:
@@ -974,6 +1103,8 @@ class DeviceRow(QWidget):
             self._gain = dialog.final_gain
         if dialog.picture_supported:
             self.set_picture(dialog.final_picture)
+        if dialog.controls_supported:
+            self.set_controls(dialog.final_controls)
         # Released only after its results are read. Qt parent-child
         # ownership would otherwise keep every Preview's window and its
         # pixmap alive for as long as Settings is open -- same reasoning as
@@ -1514,7 +1645,9 @@ class SettingsWindow(QMainWindow):
                     "metering": inst.metering,
                     "processing": None if inst.processing else False,
                 })
+                row.set_controls(inst.controls)
         self._third_person_row.set_pending_selection(cfg.third_person.vid_pid)
+        self._third_person_row.set_controls(cfg.third_person.controls)
         self.panopto_section.load_from(cfg.panopto)
         self.streaming_section.load_from(cfg.streaming)
         self.audio_section.load_from(cfg.audio)
@@ -1647,6 +1780,8 @@ class SettingsWindow(QMainWindow):
         if row.profile_id() is not None:
             shared["profile"] = row.profile_id()
 
+        if row.controls():
+            shared["controls"] = row.controls()
         if candidate is not None and candidate.kind == "net2860_winusb":
             # No serial and nothing to calibrate -- see config.py's
             # _parse_instrument.
@@ -1723,6 +1858,8 @@ class SettingsWindow(QMainWindow):
             "vid_pid": third_person_candidate.key,
             "friendly_name": third_person_candidate.source.name,
         }
+        if self._third_person_row.controls():
+            data["third_person"]["controls"] = self._third_person_row.controls()
         # Keys the app no longer honours, so a config written before the
         # ephemeral buffer stops carrying settings that do nothing.
         for dead_key in ("sessions_dir", "retention"):

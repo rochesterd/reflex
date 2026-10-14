@@ -48,6 +48,39 @@ def apply_orientation(image: np.ndarray, orientation: str) -> np.ndarray:
     return image
 
 
+@dataclass(frozen=True)
+class ControlSpec:
+    """One of a camera's own levers, as settings.py's Preview offers it: a
+    slider, and for a group the camera can judge for itself, an Auto
+    button that sets the same value a technician could have dragged to.
+
+    Everything is in the lever's own units, so what config.json stores is
+    what the slider showed. `group` collects the sliders one Auto button
+    and one Default button act on; `auto_hint` is what the technician
+    should point the camera at first. `host_processing` marks a lever that
+    only acts through Reflex's own picture processing, which Preview
+    greys out while that is switched off.
+    """
+
+    key: str
+    label: str
+    minimum: float
+    maximum: float
+    step: float
+    value: float
+    group: str
+    auto: bool = False
+    auto_hint: str = ""
+    unit: str = ""
+    decimals: int = 0
+    host_processing: bool = False
+
+
+class ControlAutoError(RuntimeError):
+    """An Auto that could not judge this picture. The message is for the
+    technician: what to change in front of the camera, then try again."""
+
+
 @dataclass
 class Frame:
     image: np.ndarray  # BGR, HxWx3, uint8
@@ -132,6 +165,30 @@ class BaseCamera(ABC):
         Each camera spends it on whatever lever it actually has, so the
         amount is deliberately unitless. Base: nothing to apply.
         """
+
+    # The technician's levers on this camera (ControlSpec). Called after
+    # start(): ranges come from the device. The base camera has none, so a
+    # caller never branches on type. The values that matter live in
+    # config.json, not the camera -- each subclass takes them at
+    # construction and applies them at open.
+    def controls(self) -> list[ControlSpec]:
+        return []
+
+    def set_control(self, key: str, value: float) -> float:
+        """Apply one lever now, clamped to its range. Returns the value
+        actually applied, which is what should be saved."""
+        raise KeyError(key)
+
+    def auto_controls(self, group: str) -> dict[str, float]:
+        """Let the camera judge `group` once against what it sees, apply the
+        result, and return it as {key: value}. Raises ControlAutoError with
+        a technician-facing reason when the picture can't be judged."""
+        raise KeyError(group)
+
+    def reset_controls(self, group: str) -> None:
+        """Put `group` back to this camera's default behaviour -- for a
+        lever the camera can run itself, its automatic one."""
+        raise KeyError(group)
 
     def start(self) -> None:
         if self._thread is not None:

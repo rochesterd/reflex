@@ -223,5 +223,17 @@ class BayerTest(unittest.TestCase):
         self.assertGreater(centre[2], centre[0] + 100)
 
 
+
+class WhiteBalanceGainsTest(unittest.TestCase):
+    def test_a_gain_scales_its_channel_before_the_curve(self):
+        from tone_curve import ToneCurve, build_luts
+
+        curve = ToneCurve(gamma=1.0, black=(0.0, 0.0, 0.0), floor_slope=1.0, gains=(2.0, 1.0, 0.5))
+        r, g, b = build_luts(curve)
+        self.assertEqual(int(g[2048]), 128)
+        self.assertEqual(int(r[1024]), int(g[2048]))   # red doubled
+        self.assertEqual(int(b[2048]), int(g[1024]))   # blue halved
+        self.assertEqual(int(r[4095]), 255)            # and it clips, rather than wrapping
+
 if __name__ == "__main__":
     unittest.main()

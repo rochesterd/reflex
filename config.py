@@ -141,6 +141,22 @@ class InstrumentConfig:
     # the beam-to-face contrast at the camera port is what the 12-bit
     # path exists for (DECISIONS.md 2026-09-29).
     processing: bool = True
+    # The camera's own levers, set in Preview (camera.ControlSpec): white
+    # balance on the IDS cameras, the legacy BIO's bridge registers. Keys
+    # are CONTROL_KEYS[kind]; absent means that lever's default, which for
+    # one the camera can run itself is its automatic behaviour. See
+    # DECISIONS.md 2026-10-14.
+    controls: dict[str, float] = field(default_factory=dict)
+
+
+# Every lever a camera of each kind may be given in `controls`. Literal
+# here so config.py stays import-light; the camera modules' own tables are
+# held to these by tests.
+CONTROL_KEYS = {
+    "ids": ("balance_red", "balance_blue"),
+    "net2860_winusb": ("contrast", "brightness", "saturation", "blue_balance", "red_balance", "sharpness"),
+    "uvc": ("exposure", "gain", "white_balance", "focus"),
+}
 
 
 @dataclass
@@ -148,6 +164,9 @@ class ThirdPersonConfig:
     kind: str
     vid_pid: str  # "XXXX:YYYY", uppercase hex -- see uvc_enumeration.py
     friendly_name: str
+    # Exposure, gain, white balance and focus, set in Preview. Absent means
+    # the webcam's own automatic behaviour, as before 2026-10-14.
+    controls: dict[str, float] = field(default_factory=dict)
 
 
 DEFAULT_RECORDING_FPS = 30
@@ -386,7 +405,8 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
                 f"{path}: instruments.{key} is kind \"{kind}\", which doesn't take "
                 f"{', '.join(sorted(unexpected))}. {_FIX_HINT}"
             )
-        return InstrumentConfig(kind=kind, serial=None, label=label, profile=profile)
+        controls = _parse_controls(path, f"instruments.{key}.controls", kind, entry.get("controls"))
+        return InstrumentConfig(kind=kind, serial=None, label=label, profile=profile, controls=controls)
 
     serial = entry.get("serial")
     if not isinstance(serial, str) or not serial:
@@ -446,7 +466,31 @@ def _parse_instrument(path: Path, key: str, entry: object) -> InstrumentConfig:
         denoise_frames=denoise_frames,
         metering=metering,
         processing=processing,
+        controls=_parse_controls(path, f"instruments.{key}.controls", kind, entry.get("controls")),
     )
+
+
+def _parse_controls(path: Path, field_name: str, kind: str, value: object) -> dict[str, float]:
+    """A camera's lever values: names this kind has, numbers for values.
+    Ranges are checked at open, against the device -- they are the
+    device's to report, and a value outside them is clamped and logged,
+    the way a calibrated gain is, rather than stranding a kiosk."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: {field_name} must be an object. {_FIX_HINT}")
+    allowed = CONTROL_KEYS.get(kind, ())
+    out: dict[str, float] = {}
+    for name, number in value.items():
+        if name not in allowed:
+            raise ConfigError(
+                f"{path}: {field_name}.{name} isn't a control a {kind} camera has "
+                f"(expected one of {', '.join(allowed)}). {_FIX_HINT}"
+            )
+        if not isinstance(number, (int, float)) or isinstance(number, bool) or number != number:
+            raise ConfigError(f"{path}: {field_name}.{name} must be a number. {_FIX_HINT}")
+        out[name] = float(number)
+    return out
 
 
 def _parse_optional_text(path: Path, field_name: str, value: object) -> str | None:
@@ -505,7 +549,8 @@ def _parse_third_person(path: Path, entry: dict) -> ThirdPersonConfig:
     if not isinstance(friendly_name, str) or not friendly_name:
         raise ConfigError(f"{path}: third_person.friendly_name must be a non-empty string. {_FIX_HINT}")
 
-    return ThirdPersonConfig(kind=kind, vid_pid=vid_pid, friendly_name=friendly_name)
+    controls = _parse_controls(path, "third_person.controls", kind, entry.get("controls"))
+    return ThirdPersonConfig(kind=kind, vid_pid=vid_pid, friendly_name=friendly_name, controls=controls)
 
 
 def _parse_recording(path: Path, entry: object) -> RecordingConfig:

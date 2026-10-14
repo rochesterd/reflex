@@ -84,7 +84,7 @@ import numpy as np
 from ids_peak import ids_peak
 from ids_peak_ipl import ids_peak_ipl
 
-from camera import BaseCamera
+from camera import BaseCamera, ControlAutoError, ControlSpec
 from device_presets import (
     black_level_for_model,
     floor_model_for_model,
@@ -103,6 +103,8 @@ from tone_curve import (
     raw_to_bgr8,
 )
 from exposure_calibration import (
+    MIN_COLOUR_PIXELS,
+    raw_colour_gains,
     DEFAULT_MAX_ITERATIONS,
     center_crop,
     exposure_budget_us,
@@ -217,6 +219,7 @@ class IdsCamera(BaseCamera):
         subtract_black: bool = False,
         denoise_frames: int | None = None,
         host_processing: bool = True,
+        controls: dict[str, float] | None = None,
     ):
         super().__init__(queue_size=queue_size, label=serial, orientation=orientation)
         self._serial = serial
@@ -264,6 +267,15 @@ class IdsCamera(BaseCamera):
         # False bypasses the whole host path: no curve, no black removal,
         # no averaging -- the camera's own conversion, the baseline.
         self._host_processing = bool(host_processing)
+        # The technician's levers (config.json controls): white balance.
+        # Which camera holds it is decided at open (_detect_white_balance):
+        # the Keeler's own ratios, or the slit lamp's host tables.
+        self._controls: dict[str, float] = dict(controls or {})
+        self._wb_mode: str | None = None
+        # A raw frame requested by the host white balance's Auto, filled in
+        # by _grab() on the capture thread.
+        self._raw_wanted = False
+        self._raw_snapshot: np.ndarray | None = None
         # The host-side curve as three per-channel lookup tables (R, G, B),
         # 12-bit raw in, 8-bit out -- see tone_curve.py. None means no host
         # curve: the frame goes through IDS's own conversion. Swapped whole,
@@ -336,6 +348,7 @@ class IdsCamera(BaseCamera):
             self._apply_black_level()
             self._apply_binning()
             self._apply_pixel_format()
+            self._wb_mode = self._detect_white_balance()
             # Owned here, every open: a GenICam camera keeps whatever tone
             # curve the last process left, so without this a student's
             # brightness setting would leak into the next calibration.
@@ -418,8 +431,14 @@ class IdsCamera(BaseCamera):
                 self.set_gain(min(gain_max, max(gain_min, self._gain)))
             else:
                 auto_converge_nodes.append("GainAuto")
-            # Always the camera's own: nothing here sets white balance.
-            auto_converge_nodes.append("BalanceWhiteAuto")
+            # The camera's own white balance converges once here, as it
+            # always has -- unless a technician saved ratios, which are the
+            # answer instead of whatever is in front of it when a student
+            # taps the picker. A no-op on the slit lamp, which has none.
+            if self._wb_mode == "device" and self._stored_balance() is not None:
+                self._write_device_balance(*self._stored_balance())
+            else:
+                auto_converge_nodes.append("BalanceWhiteAuto")
             # Whichever axes config didn't supply a calibrated value for
             # still get today's one-time auto-converge, all in one pass (a
             # no-op for any axis with no *Auto node at all -- see
@@ -832,14 +851,15 @@ class IdsCamera(BaseCamera):
             floor = None
         frames = self.denoise_frames()
         denoiser = None
+        gains = self._host_gains()
         if floor is None:
-            curve = ToneCurve(gamma=gamma, black=(0.0, 0.0, 0.0), floor_slope=64.0)
+            curve = ToneCurve(gamma=gamma, black=(0.0, 0.0, 0.0), floor_slope=64.0, gains=gains)
         else:
             gain = self.get_gain()
             curve = curve_for(
                 gamma, gain, floor, full_scale,
                 tolerance=self.shadow_tolerance(), subtract_black=self._subtract_black,
-                sigma_scale=1.0 / (frames ** 0.5),
+                sigma_scale=1.0 / (frames ** 0.5), gains=gains,
             )
             # The gate: three sigma of the noisiest channel at this gain,
             # in raw counts. Anything changing by more is motion.
@@ -1065,6 +1085,171 @@ class IdsCamera(BaseCamera):
             return
         rate_node.SetValue(min(target_fps, float(rate_node.Maximum())))
 
+    # ------------------------------------------------------- white balance
+    # The one automatic lever on these cameras that a technician could not
+    # already set by hand (exposure and gain have Auto-Calibrate and their
+    # sliders). Two homes, one face: the Keeler's own BalanceRatio nodes,
+    # or -- the slit lamp, whose transport layer publishes no white balance
+    # at all -- per-channel gains in the host tone curve's tables.
+
+    _WB_GROUP = "White balance"
+    _WB_HINT = "Put something white or grey in the lit view first."
+    _HOST_GAIN_RANGE = (0.25, 4.0)
+
+    def _detect_white_balance(self) -> str | None:
+        """"device" when the camera has writable per-channel ratios beside
+        its own auto, "host" when it has no white balance at all and its
+        frames take the host's raw path, else None."""
+        auto = self._node_map.TryFindNode("BalanceWhiteAuto")
+        selector = self._node_map.TryFindNode("BalanceRatioSelector")
+        ratio = self._node_map.TryFindNode("BalanceRatio")
+        if auto is not None and selector is not None and ratio is not None and ratio.IsAvailable():
+            return "device"
+        if auto is None and self._pixel_format == "BayerRG12":
+            return "host"
+        return None
+
+    def _stored_balance(self) -> tuple[float, float] | None:
+        red, blue = self._controls.get("balance_red"), self._controls.get("balance_blue")
+        return None if red is None or blue is None else (red, blue)
+
+    def _host_gains(self) -> tuple[float, float, float]:
+        if self._wb_mode != "host":
+            return (1.0, 1.0, 1.0)
+        return (self._controls.get("balance_red", 1.0), 1.0, self._controls.get("balance_blue", 1.0))
+
+    def _ratio_range(self, channel: str) -> tuple[float, float]:
+        self._node_map.FindNode("BalanceRatioSelector").SetCurrentEntry(channel)
+        node = self._node_map.FindNode("BalanceRatio")
+        return float(node.Minimum()), float(node.Maximum())
+
+    def _read_device_balance(self) -> tuple[float, float]:
+        values = []
+        for channel in ("Red", "Blue"):
+            self._node_map.FindNode("BalanceRatioSelector").SetCurrentEntry(channel)
+            values.append(float(self._node_map.FindNode("BalanceRatio").Value()))
+        return values[0], values[1]
+
+    def _write_device_balance(self, red: float | None, blue: float | None) -> tuple[float, float]:
+        """Manual ratios: the camera's auto off first, then each channel
+        clamped to its own range. Returns what the camera now holds."""
+        self._node_map.FindNode("BalanceWhiteAuto").SetCurrentEntry("Off")
+        for channel, value in (("Red", red), ("Blue", blue)):
+            if value is None:
+                continue
+            low, high = self._ratio_range(channel)
+            self._node_map.FindNode("BalanceRatio").SetValue(min(high, max(low, float(value))))
+        return self._read_device_balance()
+
+    def controls(self) -> list[ControlSpec]:
+        if self._node_map is None or self._wb_mode is None:
+            return []
+        if self._wb_mode == "device":
+            red, blue = self._read_device_balance()
+            ranges = {"Red": self._ratio_range("Red"), "Blue": self._ratio_range("Blue")}
+            values = {"Red": red, "Blue": blue}
+        else:
+            ranges = {"Red": self._HOST_GAIN_RANGE, "Blue": self._HOST_GAIN_RANGE}
+            gains = self._host_gains()
+            values = {"Red": gains[0], "Blue": gains[2]}
+        return [
+            ControlSpec(
+                key=f"balance_{channel.lower()}", label=channel, minimum=ranges[channel][0],
+                maximum=ranges[channel][1], step=0.01, value=values[channel], group=self._WB_GROUP,
+                auto=True, auto_hint=self._WB_HINT, unit="×", decimals=2,
+                host_processing=self._wb_mode == "host",
+            )
+            for channel in ("Red", "Blue")
+        ]
+
+    def set_control(self, key: str, value: float) -> float:
+        if key not in ("balance_red", "balance_blue") or self._wb_mode is None:
+            raise KeyError(key)
+        if self._wb_mode == "device":
+            red, blue = self._write_device_balance(
+                value if key == "balance_red" else None, value if key == "balance_blue" else None
+            )
+            self._controls.update(balance_red=red, balance_blue=blue)
+            return red if key == "balance_red" else blue
+        low, high = self._HOST_GAIN_RANGE
+        self._controls[key] = min(high, max(low, float(value)))
+        self._rebuild_host_curve()
+        return self._controls[key]
+
+    def _rebuild_host_curve(self) -> None:
+        if self._node_map is not None and self._host_luts is not None:
+            self._set_host_gamma(self._resting_gamma())
+
+    def auto_controls(self, group: str) -> dict[str, float]:
+        if group != self._WB_GROUP or self._wb_mode is None:
+            raise KeyError(group)
+        if self._wb_mode == "device":
+            red, blue = self._converge_device_balance()
+        else:
+            red, blue = self._judge_host_balance()
+            low, high = self._HOST_GAIN_RANGE
+            red, blue = min(high, max(low, red)), min(high, max(low, blue))
+            self._controls.update(balance_red=red, balance_blue=blue)
+            self._rebuild_host_curve()
+        self._controls.update(balance_red=red, balance_blue=blue)
+        return {"balance_red": red, "balance_blue": blue}
+
+    def _converge_device_balance(self) -> tuple[float, float]:
+        """The camera's own BalanceWhiteAuto, once, while the capture thread
+        keeps the frames coming -- then the ratios it reached."""
+        node = self._node_map.FindNode("BalanceWhiteAuto")
+        node.SetCurrentEntry("Once")
+        deadline = time.monotonic() + _AUTO_CONVERGE_TIMEOUT_S
+        while node.CurrentEntry().SymbolicValue() != "Off":
+            if time.monotonic() > deadline:
+                node.SetCurrentEntry("Off")
+                raise ControlAutoError(
+                    "The camera didn't settle on a white balance. Fill more of the view with "
+                    "something white or grey and try again."
+                )
+            time.sleep(0.05)
+        return self._read_device_balance()
+
+    def _judge_host_balance(self) -> tuple[float, float]:
+        """Grey from one raw frame: each channel's measured black off, then
+        the red and blue gains that bring the lit, unclipped cells level
+        with green."""
+        self._raw_snapshot = None
+        self._raw_wanted = True
+        deadline = time.monotonic() + _CALIBRATION_FRAME_TIMEOUT_S
+        while self._raw_snapshot is None:
+            if time.monotonic() > deadline:
+                self._raw_wanted = False
+                raise ControlAutoError("No raw picture arrived from the camera. Check its cable and try again.")
+            time.sleep(0.01)
+        raw = self._raw_snapshot
+        floor = floor_model_for_model(self._model_name)
+        gain = self.get_gain()
+        black = floor.black(gain, 4095) if floor is not None else (0.0, 0.0, 0.0)
+        margin = 10.0 * max(floor.sigma(gain, 4095)) if floor is not None else 64.0
+        red, blue, count = raw_colour_gains(raw, black, 4095, margin)
+        if count < MIN_COLOUR_PIXELS:
+            raise ControlAutoError(
+                "Too little lit, unclipped picture to judge colour. Light something white or grey "
+                "with the instrument, below the point where it glares, and try again."
+            )
+        return red, blue
+
+    def reset_controls(self, group: str) -> None:
+        """Default: the Keeler judges its own white balance again, the slit
+        lamp's tables go back to unity."""
+        if group != self._WB_GROUP or self._wb_mode is None:
+            raise KeyError(group)
+        self._controls.pop("balance_red", None)
+        self._controls.pop("balance_blue", None)
+        if self._wb_mode == "device":
+            try:
+                self._converge_device_balance()
+            except ControlAutoError as exc:
+                logger.warning("%s: %s", self.label, exc)
+        else:
+            self._rebuild_host_curve()
+
     def auto_calibrate(
         self,
         target: float | None = None,
@@ -1208,6 +1393,9 @@ class IdsCamera(BaseCamera):
         # frame on both real cameras.
         frame_id = buffer.FrameID()
         image = ids_peak_ipl.Image.from_image_view(buffer.ToImageView())
+        if self._raw_wanted and image.PixelFormat().PixelFormatName() == ids_peak_ipl.PixelFormatName_BayerRG12:
+            self._raw_snapshot = np.array(image.get_numpy_2D_16(), copy=True)
+            self._raw_wanted = False
         array = _to_bgr8(image, *self._current_host_curve())
         self._data_stream.QueueBuffer(buffer)
 
@@ -1238,6 +1426,7 @@ def curve_for(
     tolerance: float,
     subtract_black: bool = False,
     sigma_scale: float = 1.0,
+    gains: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> ToneCurve:
     """The tone curve for this gain from a measured floor. Pure, so the
     decision is testable without a camera.
@@ -1253,15 +1442,17 @@ def curve_for(
     if subtract_black:
         black = measured
     else:
+        # Each channel's pedestal lands on the same level *after* its white
+        # balance gain, so the floor stays neutral whatever the balance.
         mean = sum(measured) / 3.0
-        black = tuple(b - mean for b in measured)
+        black = tuple(b - mean / g for b, g in zip(measured, gains))
     # Frame averaging divides the floor's noise by about sqrt(N); the toe
     # is set for the noise that will actually reach the curve.
-    sigma = tuple(s * sigma_scale for s in floor.sigma(gain, full_scale))
+    sigma = tuple(s * sigma_scale * g for s, g in zip(floor.sigma(gain, full_scale), gains))
     # One slope for all three channels -- the noisiest decides -- so a
     # flat grey stays grey through the toe.
     slope = min(floor_slope_for_noise(sg, bk, full_scale, tolerance) for sg, bk in zip(sigma, black))
-    return ToneCurve(gamma=gamma, black=black, floor_slope=slope)
+    return ToneCurve(gamma=gamma, black=black, floor_slope=slope, gains=gains)
 
 
 def _to_bgr8(image, luts=None, denoiser=None) -> np.ndarray:

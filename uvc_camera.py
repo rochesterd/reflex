@@ -52,13 +52,24 @@ unplug. See DECISIONS.md's "UVC camera reconnects itself" entry.
 from __future__ import annotations
 
 import logging
+import math
+import threading
 import time
 
 import cv2
 import numpy as np
 
 import uvc_enumeration
-from camera import BaseCamera
+from camera import BaseCamera, ControlAutoError, ControlSpec
+from exposure_calibration import (
+    DEFAULT_TARGET_MEDIAN,
+    DEFAULT_TOLERANCE,
+    MIN_COLOUR_PIXELS,
+    center_crop,
+    colour_balance,
+    focus_measure,
+    median_brightness,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +110,43 @@ class UvcCameraNotFoundError(RuntimeError):
     """The requested device index/path could not be opened."""
 
 
+# The technician's levers on this webcam (camera.ControlSpec). DirectShow
+# reports no ranges through OpenCV, so they are probed at open -- and the
+# drivers disagree on how to say "out of range": one clamps every write and
+# reports the clamped value, another refuses anything outside its range or
+# off its step. _probe_range() handles both. Measured 2026-10-14 on a
+# laptop's integrated webcam, not yet on the clinic's ELP.
+_EXPOSURE = "exposure"
+_GAIN = "gain"
+_WHITE_BALANCE = "white_balance"
+_FOCUS = "focus"
+_GROUP_EXPOSURE = "Exposure"
+_GROUP_COLOUR = "White balance"
+_GROUP_FOCUS = "Focus"
+_GROUPS = {_EXPOSURE: _GROUP_EXPOSURE, _GAIN: _GROUP_EXPOSURE, _WHITE_BALANCE: _GROUP_COLOUR, _FOCUS: _GROUP_FOCUS}
+# Guesses wide enough to include any UVC device's range; the probe narrows
+# them. Exposure is DirectShow's log2 seconds: -5 is 1/32 s.
+_PROBE_LIMITS = {
+    _EXPOSURE: (cv2.CAP_PROP_EXPOSURE, -14, 0),
+    _GAIN: (cv2.CAP_PROP_GAIN, 0, 1024),
+    _WHITE_BALANCE: (cv2.CAP_PROP_WB_TEMPERATURE, 1000, 12000),
+    _FOCUS: (cv2.CAP_PROP_FOCUS, 0, 1023),
+}
+_STEPS_TO_TRY = (1, 2, 5, 10, 25, 50, 100)
+# Frames to wait after a write before judging the picture: DirectShow keeps
+# a frame or two in flight, and the sensor needs one more to expose.
+_SETTLE_FRAMES = 4
+_SETTLE_TIMEOUT_S = 2.0
+# Default, for the levers the webcam can run itself: let it, then lock --
+# the same two seconds the open-time warmup gives it.
+_DEFAULT_RUN_S = 2.0
+
+
+def _exposure_budget_log2(fps: float | None) -> int:
+    """The longest DirectShow exposure step that fits one frame at `fps`."""
+    return int(math.floor(math.log2(1.0 / (fps or 30.0))))
+
+
 class UvcCamera(BaseCamera):
     def __init__(
         self,
@@ -107,6 +155,8 @@ class UvcCamera(BaseCamera):
         name: str = "third-person",
         queue_size: int = 2,
         target_fps: float | None = None,
+        controls: dict[str, float] | None = None,
+        probe_controls: bool = False,
     ):
         if (device is None) == (vid_pid is None):
             raise ValueError("UvcCamera requires exactly one of device or vid_pid")
@@ -124,6 +174,20 @@ class UvcCamera(BaseCamera):
         # free-run, e.g. settings.py's Preview cameras, which deliberately
         # never pass this.
         self._target_fps = target_fps
+        # The technician's values (config.json third_person.controls),
+        # reapplied on every open and reconnect. An absent key leaves that
+        # lever to the webcam's own automatic behaviour.
+        self._controls: dict[str, float] = dict(controls or {})
+        # Ranges, probed at open only when asked (settings.py's Preview):
+        # the kiosk has no slider to size, and the driver clamps or refuses
+        # a stored value itself.
+        self._probe = probe_controls
+        self._ranges: dict[str, tuple[float, float, float]] = {}
+        # Writes from the UI thread, applied by the capture thread between
+        # reads: cv2.VideoCapture is not shared across threads here.
+        self._writes_lock = threading.Lock()
+        self._pending_writes: list[tuple[int, float]] = []
+        self._writes_applied_at = 0
 
     @property
     def resolution(self) -> tuple[int, int]:
@@ -192,6 +256,8 @@ class UvcCamera(BaseCamera):
         self._counter = 0
         self._consecutive_failures = 0
         self._last_reconnect_attempt = 0.0
+        if self._probe:
+            self._ranges = self._probe_ranges(cap)
         self._cap = cap
 
     def _apply_frame_rate_cap(self, cap: cv2.VideoCapture) -> None:
@@ -256,6 +322,220 @@ class UvcCamera(BaseCamera):
 
         cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
         cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        self._apply_stored_controls(cap)
+
+    def _apply_stored_controls(self, cap: cv2.VideoCapture) -> None:
+        """The technician's levers, after the warmup: a stored exposure
+        replaces what auto-exposure reached, a stored white balance stops the
+        webcam's continuous auto, a stored focus replaces the autofocus.
+        On every open and every reconnect -- the app holds these values, not
+        the webcam."""
+        if _EXPOSURE in self._controls:
+            cap.set(cv2.CAP_PROP_EXPOSURE, self._controls[_EXPOSURE])
+        if _GAIN in self._controls:
+            cap.set(cv2.CAP_PROP_GAIN, self._controls[_GAIN])
+        if _WHITE_BALANCE in self._controls:
+            cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+            if not cap.set(cv2.CAP_PROP_WB_TEMPERATURE, self._controls[_WHITE_BALANCE]):
+                logger.warning("%s: white balance %.0f K refused by the webcam", self.label,
+                               self._controls[_WHITE_BALANCE])
+        if _FOCUS in self._controls:
+            cap.set(cv2.CAP_PROP_FOCUS, self._controls[_FOCUS])
+
+    # ------------------------------------------------------------ controls
+
+    def _probe_ranges(self, cap: cv2.VideoCapture) -> dict[str, tuple[float, float, float]]:
+        """(minimum, maximum, step) for each lever this webcam has, put back
+        as it was afterwards. A lever whose range is a single value (a
+        fixed-gain sensor) or that refuses every write is left out."""
+        ranges = {}
+        for key, (prop, low, high) in _PROBE_LIMITS.items():
+            current = cap.get(prop)
+            if current == -1:
+                continue  # DirectShow's "no such control"
+            try:
+                found = _probe_range(cap, prop, low, high, current)
+            finally:
+                cap.set(prop, current)
+            if found is not None and found[1] > found[0]:
+                ranges[key] = found
+        if _EXPOSURE in ranges:
+            low, high, step = ranges[_EXPOSURE]
+            # Exposure is a frame-rate budget (CLAUDE.md): never offer more
+            # than a frame's worth.
+            ranges[_EXPOSURE] = (low, min(high, max(low, _exposure_budget_log2(self._target_fps))), step)
+        return ranges
+
+    _LABELS = {_EXPOSURE: "Exposure", _GAIN: "Gain", _WHITE_BALANCE: "Colour temperature", _FOCUS: "Focus"}
+    _UNITS = {_EXPOSURE: "log2 s", _GAIN: "", _WHITE_BALANCE: "K", _FOCUS: ""}
+    _HINTS = {
+        _GROUP_EXPOSURE: "Have the hands and the instrument in view, as during a session.",
+        _GROUP_COLOUR: "Hold something white or grey in front of the camera first.",
+        _GROUP_FOCUS: "Have the hands where they will be during a session.",
+    }
+
+    def controls(self) -> list[ControlSpec]:
+        specs = []
+        for key, (low, high, step) in self._ranges.items():
+            value = self._controls.get(key)
+            if value is None and self._cap is not None:
+                value = self._cap.get(_PROBE_LIMITS[key][0])
+            value = low if value is None else min(high, max(low, value))
+            group = _GROUPS[key]
+            specs.append(ControlSpec(
+                key=key, label=self._LABELS[key], minimum=low, maximum=high, step=step, value=value,
+                group=group, auto=True, auto_hint=self._HINTS[group], unit=self._UNITS[key],
+            ))
+        return specs
+
+    def set_control(self, key: str, value: float) -> float:
+        if key not in _PROBE_LIMITS:
+            raise KeyError(key)
+        if key in self._ranges:
+            low, high, step = self._ranges[key]
+            value = min(high, max(low, low + round((value - low) / step) * step))
+        self._controls[key] = float(value)
+        writes = [(_PROBE_LIMITS[key][0], value)]
+        if key == _EXPOSURE:
+            writes.insert(0, (cv2.CAP_PROP_AUTO_EXPOSURE, 0.25))
+        elif key == _WHITE_BALANCE:
+            writes.insert(0, (cv2.CAP_PROP_AUTO_WB, 0))
+        elif key == _FOCUS:
+            writes.insert(0, (cv2.CAP_PROP_AUTOFOCUS, 0))
+        self._queue_writes(writes)
+        return float(value)
+
+    def _queue_writes(self, writes: list[tuple[int, float]]) -> None:
+        with self._writes_lock:
+            self._pending_writes.extend(writes)
+
+    def _apply_pending_writes(self) -> None:
+        """On the capture thread, between reads."""
+        with self._writes_lock:
+            writes, self._pending_writes = self._pending_writes, []
+        if not writes or self._cap is None:
+            return
+        for prop, value in writes:
+            self._cap.set(prop, value)
+        self._writes_applied_at = self._counter
+
+    def _settled_frame(self) -> np.ndarray:
+        """The first frame exposed after the last queued writes landed."""
+        deadline = time.monotonic() + _SETTLE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            with self._writes_lock:
+                pending = bool(self._pending_writes)
+            if not pending and self._counter >= self._writes_applied_at + _SETTLE_FRAMES:
+                frame = self.get_latest()
+                if frame is not None:
+                    return frame.image
+            time.sleep(0.01)
+        raise ControlAutoError("The webcam stopped sending pictures. Check its cable and try again.")
+
+    def _try(self, key: str, value: float) -> np.ndarray:
+        self.set_control(key, value)
+        return self._settled_frame()
+
+    def auto_controls(self, group: str) -> dict[str, float]:
+        if group == _GROUP_EXPOSURE and _EXPOSURE in self._ranges:
+            return self._auto_exposure()
+        if group == _GROUP_COLOUR and _WHITE_BALANCE in self._ranges:
+            return self._auto_white_balance()
+        if group == _GROUP_FOCUS and _FOCUS in self._ranges:
+            return self._auto_focus()
+        raise KeyError(group)
+
+    def _auto_exposure(self) -> dict[str, float]:
+        """Longest exposure that fits a frame and doesn't overshoot the
+        target, then gain only if that is still too dark -- the same order
+        as the instrument cameras' Auto-Calibrate, for the same reason:
+        gain is noise."""
+        low, high, step = self._ranges[_EXPOSURE]
+        result = {}
+        if _GAIN in self._ranges:
+            result[_GAIN] = self.set_control(_GAIN, self._ranges[_GAIN][0])
+        best, best_error = high, None
+        exposure = high
+        while exposure >= low:
+            measured = median_brightness(center_crop(self._try(_EXPOSURE, exposure)))
+            error = measured - DEFAULT_TARGET_MEDIAN
+            if best_error is None or abs(error) < abs(best_error):
+                best, best_error = exposure, error
+            if error <= DEFAULT_TOLERANCE:
+                break  # every shorter step is darker still
+            exposure -= step
+        result[_EXPOSURE] = self.set_control(_EXPOSURE, best)
+        if best == high and best_error is not None and best_error < -DEFAULT_TOLERANCE and _GAIN in self._ranges:
+            result[_GAIN] = self._bisect(
+                _GAIN, lambda image: median_brightness(center_crop(image)) - DEFAULT_TARGET_MEDIAN
+            )
+        self._settled_frame()
+        return result
+
+    def _auto_white_balance(self) -> dict[str, float]:
+        """The colour temperature at which the picture's usable pixels
+        average grey: red and blue equal. Blue-minus-red moves one way as
+        the setting rises, whichever way a driver has it."""
+        def imbalance(image: np.ndarray) -> float:
+            red, blue, count = colour_balance(image)
+            if count < MIN_COLOUR_PIXELS:
+                raise ControlAutoError(
+                    "Too dark or too bright to judge colour. Set the exposure first, "
+                    "then hold something white or grey in front of the camera."
+                )
+            return blue - red
+
+        return {_WHITE_BALANCE: self._bisect(_WHITE_BALANCE, imbalance)}
+
+    def _auto_focus(self) -> dict[str, float]:
+        """A coarse sweep for the sharpest middle of the picture, then a
+        fine one around it."""
+        low, high, step = self._ranges[_FOCUS]
+        coarse = max(step, (high - low) / 12.0)
+        best = max(_frange(low, high, coarse), key=lambda v: focus_measure(self._try(_FOCUS, v)))
+        fine = [v for v in _frange(best - coarse, best + coarse, max(step, coarse / 6.0)) if low <= v <= high]
+        best = max(fine, key=lambda v: focus_measure(self._try(_FOCUS, v)))
+        return {_FOCUS: self.set_control(_FOCUS, best)}
+
+    def _bisect(self, key: str, error_of) -> float:
+        """The lever value where `error_of(frame)` crosses zero, assuming it
+        moves one way across the range. If it never crosses, the end that
+        came closest."""
+        low, high, step = self._ranges[key]
+        e_low = error_of(self._try(key, low))
+        e_high = error_of(self._try(key, high))
+        if (e_low > 0) == (e_high > 0):
+            return self.set_control(key, low if abs(e_low) < abs(e_high) else high)
+        sign_low = e_low > 0
+        while high - low > step:
+            middle = low + round((high - low) / 2.0 / step) * step
+            if not low < middle < high:
+                break
+            if (error_of(self._try(key, middle)) > 0) == sign_low:
+                low = middle
+            else:
+                high = middle
+        return self.set_control(key, low)
+
+    def reset_controls(self, group: str) -> None:
+        """Back to what the webcam does on its own: auto-exposure and
+        autofocus run for two seconds then lock, as at open; white balance
+        goes back to the webcam's continuous auto."""
+        keys = [key for key, g in _GROUPS.items() if g == group]
+        if not keys:
+            raise KeyError(group)
+        for key in keys:
+            self._controls.pop(key, None)
+        if group == _GROUP_EXPOSURE:
+            self._queue_writes([(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)])
+            time.sleep(_DEFAULT_RUN_S)
+            self._queue_writes([(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)])
+        elif group == _GROUP_COLOUR:
+            self._queue_writes([(cv2.CAP_PROP_AUTO_WB, 1)])
+        elif group == _GROUP_FOCUS:
+            self._queue_writes([(cv2.CAP_PROP_AUTOFOCUS, 1)])
+            time.sleep(_DEFAULT_RUN_S)
+            self._queue_writes([(cv2.CAP_PROP_AUTOFOCUS, 0)])
 
     def _close(self) -> None:
         if self._cap is not None:
@@ -263,6 +543,7 @@ class UvcCamera(BaseCamera):
             self._cap = None
 
     def _grab(self) -> tuple[np.ndarray, float, int] | None:
+        self._apply_pending_writes()
         ok, image = self._cap.read() if self._cap is not None else (False, None)
         if ok and image is not None:
             self._consecutive_failures = 0
@@ -327,3 +608,47 @@ class UvcCamera(BaseCamera):
         self._cap = cap
         self._consecutive_failures = 0
         logger.info("%s: UVC device reopened", self.label)
+
+
+def _frange(start: float, stop: float, step: float) -> list[float]:
+    values, value = [], start
+    while value <= stop + 1e-9:
+        values.append(value)
+        value += step
+    return values
+
+
+def _probe_range(cap: cv2.VideoCapture, prop: int, low: float, high: float, current: float):
+    """(minimum, maximum, step) a driver accepts for `prop`, or None.
+
+    The step first, from the current value: the smallest of _STEPS_TO_TRY
+    either side of it that the driver takes and reads back exactly -- a
+    refusing driver rejects anything off its grid (2799 K and 4555 K, where
+    2800 K and 6500 K were taken). Then each limit: a clamping driver
+    accepts the guess and reads back its own limit; a refusing one rejects
+    it, so the limit is bisected on that grid toward the current value."""
+    if not cap.set(prop, current):
+        return None
+    current = cap.get(prop)
+
+    def takes(value: float) -> bool:
+        return bool(cap.set(prop, value)) and abs(cap.get(prop) - value) < 1e-6
+
+    step = next((s for s in _STEPS_TO_TRY if takes(current - s) or takes(current + s)), None)
+    if step is None:
+        return None
+
+    def limit(guess: float) -> float:
+        if cap.set(prop, guess):
+            return cap.get(prop)
+        direction = 1.0 if guess > current else -1.0
+        good, bad = 0, int(math.ceil(abs(guess - current) / step))
+        while bad - good > 1:
+            middle = (good + bad) // 2
+            if cap.set(prop, current + direction * middle * step):
+                good = middle
+            else:
+                bad = middle
+        return current + direction * good * step
+
+    return float(limit(low)), float(limit(high)), float(step)

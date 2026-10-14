@@ -5749,3 +5749,62 @@ floor makes that read as dim rather than absent; only light makes it
 visible. Test with a model eye or skin, with the room's light on it.
 
 ---
+
+## 2026-10-14 — Every camera's own levers: an Auto and a slider, saved in config
+
+**Asked:** for anything automatic that isn't bulletproof on its own, give
+the technician an Auto button and a slider to set it by hand. Same "for
+now" footing as 2026-09-29: CLAUDE.md's ownership table prefers derived
+values, and a lever that proves right per model becomes a preset.
+
+| Camera | Was automatic | Now in Preview |
+|---|---|---|
+| Slit lamp | nothing for colour: no white balance node | White balance: Auto, Red, Blue (host tables) |
+| Keeler | BalanceWhiteAuto at every open | White balance: Auto, Red, Blue (its own ratios) |
+| Legacy BIO | AE/AWB on the camera board, unreachable | Picture: the six bridge registers; no Auto |
+| Hands webcam | 2 s auto-exposure then frozen; AWB continuous | Exposure + gain, white balance, focus: Auto each |
+
+**The shape.** A camera describes its levers as `camera.ControlSpec`s;
+Preview builds one box per group: sliders, an Auto that sets the value a
+slider would, and Default, which hands the group back to the camera's own
+behaviour. Values go in `config.json` as `controls`, keyed per kind
+(`config.CONTROL_KEYS`), and are applied at every open and reconnect. A
+stored white balance means the Keeler no longer judges colour against
+whatever is in front of it when a student taps the picker; a stored
+webcam exposure replaces the warmup's guess -- ROADMAP's "Hands camera
+exposure" item, built and removed from it.
+
+**The webcam, measured on a laptop's integrated one (not the ELP):** OpenCV
+exposes no ranges, and drivers say "out of range" differently. Exposure
+took every write and clamped it (-10 to -4, log2 s); white balance refused
+anything outside 2800-6500 K or off its 10 K grid; gain took only 1-8. So
+ranges are probed at open, step first, then each limit on that grid --
+only for Preview (`probe_controls`). After the webcam's own auto runs,
+OpenCV reads back the last value *written*, not the one it reached, so
+its Auto buttons meter the picture instead: exposure longest-first within
+a frame, then gain; white balance bisected until red and blue average
+level; focus by a coarse then fine sharpness sweep. Writes from the UI
+thread queue for the capture thread, which owns the VideoCapture.
+
+**The slit lamp's white balance** is a per-channel gain in the host tone
+curve's tables, after each channel's black. Its Auto judges one raw frame:
+blacks off, then the gains that level red and blue with green over lit,
+unclipped cells. With the black kept (the 2026-10-13 default) each
+channel's pedestal is placed so it lands on the same level *after* its
+gain, so the floor stays neutral whatever the balance.
+
+**The legacy BIO** gets sliders, not Auto: its exposure and colour are
+judged on the camera board. Contrast and saturation ranges are the 5 bits
+measured 2026-09-13; brightness, the balances and sharpness are Linux
+em28xx's limits, unmeasured, which the existing readback reports. The
+kiosk's Brightness slider now starts from the technician's brightness.
+
+**Not offered:** black level (IDS Cockpit's, per CLAUDE.md), binning, and
+anything on the legacy BIO's camera board.
+
+**Unverified on hardware:** that the Keeler's BalanceRatio is writable --
+offered only if the node is there at open; the slit lamp's Auto on a real
+target; the legacy BIO's unmeasured ranges; the ELP's ranges and every
+webcam Auto on a lit scene (the laptop camera faced a dark room).
+
+---

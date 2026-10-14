@@ -58,6 +58,9 @@ class ToneCurve:
     black: tuple[float, float, float]  # per channel R, G, B, raw units
     floor_slope: float = 2.0  # slope at black; 1.0 is no lift there at all
     bits: int = 12
+    # Per-channel white balance, applied after the black and before the
+    # curve: the slit lamp's camera has none of its own (IMAGING.md).
+    gains: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     @property
     def full_scale(self) -> int:
@@ -103,13 +106,13 @@ def curve_values(x: np.ndarray, gamma: float, floor_slope: float) -> np.ndarray:
 
 def build_luts(curve: ToneCurve) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """One uint8 lookup table per channel (R, G, B), raw code in, 8-bit out."""
-    return tuple(_lut_for(curve, black) for black in curve.black)  # type: ignore[return-value]
+    return tuple(_lut_for(curve, black, gain) for black, gain in zip(curve.black, curve.gains))  # type: ignore[return-value]
 
 
-def _lut_for(curve: ToneCurve, black: float) -> np.ndarray:
+def _lut_for(curve: ToneCurve, black: float, gain: float = 1.0) -> np.ndarray:
     codes = np.arange(curve.full_scale + 1, dtype=np.float64)
     span = max(1.0, curve.full_scale - black)
-    x = np.clip((codes - black) / span, 0.0, 1.0)
+    x = np.clip((codes - black) * gain / span, 0.0, 1.0)
     y = curve_values(x, curve.gamma, curve.floor_slope)
     return np.clip(np.round(y * 255.0), 0, 255).astype(np.uint8)
 

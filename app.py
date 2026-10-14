@@ -944,7 +944,7 @@ def _make_camera(
         # exposure on board, where the host can't reach it.
         from net2860_winusb_camera import Net2860WinUsbCamera
 
-        return Net2860WinUsbCamera(label=name)
+        return Net2860WinUsbCamera(label=name, picture={k: int(v) for k, v in inst.controls.items()})
 
     # kind == "ids" -- config.py's _parse_instrument only allows "ids" or
     # "net2860_winusb", and "net2860_winusb" was handled above.
@@ -973,15 +973,17 @@ def _make_camera(
         subtract_black=inst.subtract_black,
         denoise_frames=inst.denoise_frames,
         host_processing=inst.processing,
+        controls=inst.controls,
     )
 
 
 def _make_third_person_camera(
-    vid_pid: str | None, synthetic: bool, name: str, target_fps: float | None = None
+    vid_pid: str | None, synthetic: bool, name: str, target_fps: float | None = None,
+    controls: dict | None = None,
 ) -> BaseCamera:
     if synthetic:
         return SyntheticCamera(*THIRD_PERSON_SYNTHETIC_RESOLUTION, name=name, fps=30)
-    return UvcCamera(vid_pid=vid_pid, name=name, target_fps=target_fps)
+    return UvcCamera(vid_pid=vid_pid, name=name, target_fps=target_fps, controls=controls)
 
 
 def main() -> int:
@@ -1060,7 +1062,8 @@ def main() -> int:
         for key, inst in cfg.instruments.items()
     }
     third_person = _make_third_person_camera(
-        cfg.third_person.vid_pid, third_person_synthetic, "third-person", target_fps=cfg.recording.fps
+        cfg.third_person.vid_pid, third_person_synthetic, "third-person", target_fps=cfg.recording.fps,
+        controls=cfg.third_person.controls,
     )
     audio: AudioCapture | None = None
     if cfg.audio is not None and not cfg.streaming.enabled:

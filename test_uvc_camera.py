@@ -201,5 +201,97 @@ class UvcCameraFrameRateCapTest(unittest.TestCase):
             self.assertEqual(fps_calls, [])
 
 
+
+class _ClampingCap:
+    """A driver that takes any write and clamps it, like the laptop
+    webcam's exposure; or refuses anything off its range and grid, like
+    its white balance. Measured 2026-10-14."""
+
+    def __init__(self, low, high, step, value, refuse):
+        self.low, self.high, self.step, self.value, self.refuse = low, high, step, value, refuse
+
+    def set(self, prop, value):
+        on_grid = abs((value - self.low) / self.step - round((value - self.low) / self.step)) < 1e-9
+        if self.refuse and (not self.low <= value <= self.high or not on_grid):
+            return False
+        self.value = min(self.high, max(self.low, value))
+        return True
+
+    def get(self, prop):
+        return self.value
+
+
+class UvcControlsTest(unittest.TestCase):
+    def test_probe_finds_a_clamping_drivers_limits(self):
+        from uvc_camera import _probe_range
+
+        cap = _ClampingCap(-10, -4, 1, -6, refuse=False)
+        self.assertEqual(_probe_range(cap, 0, -14, 0, -6), (-10.0, -4.0, 1.0))
+
+    def test_probe_finds_a_refusing_drivers_limits_on_its_grid(self):
+        from uvc_camera import _probe_range
+
+        cap = _ClampingCap(2800, 6500, 10, 4600, refuse=True)
+        self.assertEqual(_probe_range(cap, 0, 1000, 12000, 4600), (2800.0, 6500.0, 10.0))
+
+    def test_a_lever_with_one_value_is_not_offered(self):
+        from uvc_camera import _probe_range
+
+        cap = _ClampingCap(1, 1, 1, 1, refuse=True)
+        self.assertIsNone(_probe_range(cap, 0, 0, 1024, 1))
+
+    def test_exposure_is_held_to_a_frame(self):
+        from uvc_camera import _exposure_budget_log2
+
+        self.assertEqual(_exposure_budget_log2(30), -5)   # 31 ms
+        self.assertEqual(_exposure_budget_log2(15), -4)   # 62 ms
+        self.assertEqual(_exposure_budget_log2(None), -5)
+
+    def test_stored_levers_are_applied_after_the_warmup(self):
+        camera = UvcCamera(device=0, controls={"exposure": -6, "white_balance": 4500})
+        cap = MagicMock()
+        cap.set.return_value = True
+        camera._configure_capture(cap)
+        cap.set.assert_has_calls([
+            call(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25),
+            call(cv2.CAP_PROP_EXPOSURE, -6),
+            call(cv2.CAP_PROP_AUTO_WB, 0),
+            call(cv2.CAP_PROP_WB_TEMPERATURE, 4500),
+        ])
+
+    def test_no_stored_levers_leaves_the_webcam_its_auto(self):
+        camera = UvcCamera(device=0)
+        cap = MagicMock()
+        camera._configure_capture(cap)
+        props = [c.args[0] for c in cap.set.call_args_list]
+        self.assertNotIn(cv2.CAP_PROP_AUTO_WB, props)
+        self.assertNotIn(cv2.CAP_PROP_EXPOSURE, props)
+
+    def test_a_live_write_waits_for_the_capture_thread(self):
+        camera = UvcCamera(device=0)
+        camera._ranges = {"white_balance": (2800.0, 6500.0, 10.0)}
+        camera._cap = MagicMock()
+        camera._cap.read.return_value = (True, np.zeros((4, 4, 3), dtype=np.uint8))
+        self.assertEqual(camera.set_control("white_balance", 3017), 3020.0)
+        camera._cap.set.assert_not_called()  # not from the calling thread
+        camera._grab()
+        camera._cap.set.assert_has_calls([call(cv2.CAP_PROP_AUTO_WB, 0), call(cv2.CAP_PROP_WB_TEMPERATURE, 3020.0)])
+        self.assertEqual(camera._controls, {"white_balance": 3020.0})
+
+    def test_default_hands_white_balance_back_to_the_webcam(self):
+        camera = UvcCamera(device=0, controls={"white_balance": 4500})
+        camera._cap = MagicMock()
+        camera._cap.read.return_value = (True, np.zeros((4, 4, 3), dtype=np.uint8))
+        camera.reset_controls("White balance")
+        camera._grab()
+        camera._cap.set.assert_called_with(cv2.CAP_PROP_AUTO_WB, 1)
+        self.assertEqual(camera._controls, {})
+
+    def test_config_knows_the_same_names(self):
+        from config import CONTROL_KEYS
+        from uvc_camera import _PROBE_LIMITS
+
+        self.assertEqual(set(CONTROL_KEYS["uvc"]), set(_PROBE_LIMITS))
+
 if __name__ == "__main__":
     unittest.main()

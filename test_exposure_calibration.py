@@ -287,5 +287,48 @@ class NextExposureGainBudgetTest(unittest.TestCase):
         self.assertGreaterEqual(1_000_000.0 / exposure, 30.0)
 
 
+
+class ColourAndFocusTest(unittest.TestCase):
+    def test_colour_balance_reads_grey_as_one_and_skips_clipped_and_black(self):
+        from exposure_calibration import colour_balance
+
+        image = np.zeros((20, 20, 3), dtype=np.uint8)
+        image[:10] = (100, 100, 100)          # grey, BGR
+        image[10:15] = (255, 255, 255)        # clipped: no ratio left
+        image[15:] = (5, 5, 30)               # near black: noise
+        self.assertEqual(colour_balance(image)[:2], (1.0, 1.0))
+        image[:10] = (60, 100, 150)           # warm cast
+        red, blue, count = colour_balance(image)
+        self.assertAlmostEqual(red, 1.5)
+        self.assertAlmostEqual(blue, 0.6)
+        self.assertEqual(count, 200)
+
+    def test_raw_colour_gains_take_each_black_off_first(self):
+        from exposure_calibration import raw_colour_gains
+
+        raw = np.zeros((40, 40), dtype=np.uint16)
+        black = (100.0, 80.0, 120.0)
+        # A grey target that the sensor sees as R 0.5x, B 0.8x of green.
+        raw[0::2, 0::2] = 100 + 500
+        raw[0::2, 1::2] = 80 + 1000
+        raw[1::2, 0::2] = 80 + 1000
+        raw[1::2, 1::2] = 120 + 800
+        red, blue, count = raw_colour_gains(raw, black, 4095, floor_margin=50)
+        self.assertAlmostEqual(red, 2.0)
+        self.assertAlmostEqual(blue, 1.25)
+        self.assertEqual(count, 400)
+        raw[:] = 4095  # all clipped
+        self.assertEqual(raw_colour_gains(raw, black, 4095, 50)[2], 0)
+
+    def test_focus_measure_prefers_the_sharp_frame(self):
+        from exposure_calibration import focus_measure
+
+        rng = np.random.default_rng(1)
+        sharp = (rng.random((120, 160, 3)) > 0.5).astype(np.uint8) * 255
+        blurred = sharp.astype(np.float64)
+        for _ in range(4):
+            blurred = (blurred + np.roll(blurred, 1, 0) + np.roll(blurred, 1, 1)) / 3.0
+        self.assertGreater(focus_measure(sharp), 4 * focus_measure(blurred.astype(np.uint8)))
+
 if __name__ == "__main__":
     unittest.main()

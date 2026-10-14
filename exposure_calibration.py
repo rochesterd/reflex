@@ -237,3 +237,64 @@ def next_exposure_gain(
     new_exposure = min(exposure_max, max(exposure_min, desired_light / gain_min))
     new_gain = min(gain_max, max(gain_min, desired_light / new_exposure))
     return new_exposure, new_gain
+
+
+# --- Colour and focus, for the Auto buttons on the cameras' own levers
+# (camera.ControlSpec). Same rule as above: measured on what the camera
+# sees, so the result is a number a technician could have set by hand.
+
+# Pixels this close to either end of 8 bits say nothing about colour: a
+# clipped channel has lost its ratio, a near-black one is mostly noise.
+COLOUR_LOW = 20.0
+COLOUR_HIGH = 250.0
+# Fewer usable pixels than this and the picture can't be judged.
+MIN_COLOUR_PIXELS = 500
+
+
+def colour_balance(image: np.ndarray, low: float = COLOUR_LOW, high: float = COLOUR_HIGH) -> tuple[float, float, int]:
+    """(mean red / mean green, mean blue / mean green, pixels used) over
+    every pixel whose three channels are all inside (low, high). A grey or
+    white target reads (1.0, 1.0); the white balance is right when it does.
+    BGR in, as every frame in this app is."""
+    pixels = image.reshape(-1, 3).astype(np.float64)
+    usable = np.all((pixels > low) & (pixels < high), axis=1)
+    count = int(usable.sum())
+    if count == 0:
+        return 1.0, 1.0, 0
+    blue, green, red = pixels[usable].mean(axis=0)
+    green = max(green, 1e-6)
+    return float(red / green), float(blue / green), count
+
+
+def raw_colour_gains(
+    raw: np.ndarray, black: tuple[float, float, float], full_scale: int, floor_margin: float
+) -> tuple[float, float, int]:
+    """The (red, blue) gains that make a BayerRG frame's lit, unclipped
+    parts grey, and how many 2x2 cells were used. Each channel has its own
+    measured black taken off first -- the floor is not neutral (IMAGING.md)
+    and a ratio of pedestals is not a colour. `floor_margin` is how far
+    above its black a cell's green must be to count as lit."""
+    r = raw[0::2, 0::2].astype(np.float64) - black[0]
+    g = (raw[0::2, 1::2].astype(np.float64) + raw[1::2, 0::2]) / 2.0 - black[1]
+    b = raw[1::2, 1::2].astype(np.float64) - black[2]
+    clip = 0.95 * full_scale
+    usable = (
+        (raw[0::2, 0::2] < clip) & (raw[0::2, 1::2] < clip) & (raw[1::2, 0::2] < clip) & (raw[1::2, 1::2] < clip)
+        & (g > floor_margin) & (r > 0) & (b > 0)
+    )
+    count = int(usable.sum())
+    if count == 0:
+        return 1.0, 1.0, 0
+    green = g[usable].sum()
+    return float(green / r[usable].sum()), float(green / b[usable].sum()), count
+
+
+def focus_measure(image: np.ndarray) -> float:
+    """How sharp the middle of the picture is: the variance of a Laplacian
+    on its grey values. Larger is sharper; only comparable between frames
+    of the same scene, which is all a focus sweep needs."""
+    grey = center_crop(image).astype(np.float64).mean(axis=2)
+    lap = (
+        -4.0 * grey[1:-1, 1:-1] + grey[:-2, 1:-1] + grey[2:, 1:-1] + grey[1:-1, :-2] + grey[1:-1, 2:]
+    )
+    return float(lap.var())

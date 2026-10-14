@@ -50,7 +50,7 @@ import cv2
 import numpy as np
 
 from camera import ORIENTATION_NONE, BaseCamera
-from net2860_init import PICTURE_DEFAULTS, PICTURE_REGISTERS, START_WRITES
+from net2860_init import PICTURE_DEFAULTS, PICTURE_RANGES, PICTURE_REGISTERS, START_WRITES
 from winusb import IsochReader, WinUsbDevice, WinUsbError
 
 logger = logging.getLogger(__name__)
@@ -130,7 +130,11 @@ class Net2860WinUsbCamera(BaseCamera):
         # adopted deliberately -- see net2860_init.PICTURE_DEFAULTS.
         self._picture = dict(PICTURE_DEFAULTS)
         if picture:
-            self._picture.update(picture)
+            for name, value in picture.items():
+                self._picture[name] = self._clamp_picture(name, value)
+        # Where the kiosk's Brightness slider starts: the technician's
+        # brightness, not Keeler's, once one has been set.
+        self._base_brightness = self._picture["brightness"]
         self._packets = packets_per_transfer
         self._depth = transfer_depth
         self._dev: WinUsbDevice | None = None
@@ -208,11 +212,12 @@ class Net2860WinUsbCamera(BaseCamera):
     # register is quantized in hardware, so this travel is 48 steps rather
     # than continuous -- far finer than a thumb resolves.
     BRIGHTNESS_ADJUSTABLE = True
-    _BRIGHTNESS_RANGE = (0x08, 0x38)
+    _BRIGHTNESS_SPAN = 0x30
 
     def set_brightness(self, amount: float) -> None:
         amount = max(0.0, min(1.0, float(amount)))
-        low, high = self._BRIGHTNESS_RANGE
+        low = self._base_brightness
+        high = min(0x7F, low + self._BRIGHTNESS_SPAN)
         self._picture["brightness"] = int(round(low + amount * (high - low)))
         if self._dev is not None:
             self._apply_picture()
@@ -230,15 +235,66 @@ class Net2860WinUsbCamera(BaseCamera):
         saturation ignore bits above 0x1f) shows up instead of silently
         misbehaving.
         """
-        for name, value in self._picture.items():
-            register = PICTURE_REGISTERS[name]
-            self._dev.control(0x40, 0x01, value, register, data=bytes([value]))
-            got = self._dev.control(0xC0, 0x00, 0, register, length=1)[0]
-            if got != value:
-                logger.warning(
-                    "%s: %s (register 0x%02x) set to 0x%02x but reads 0x%02x",
-                    self.label, name, register, value, got,
-                )
+        for name in self._picture:
+            self._write_picture_register(name)
+
+    def _write_picture_register(self, name: str) -> None:
+        value = self._picture[name] & 0xFF  # brightness and balances are signed
+        register = PICTURE_REGISTERS[name]
+        self._dev.control(0x40, 0x01, value, register, data=bytes([value]))
+        got = self._dev.control(0xC0, 0x00, 0, register, length=1)[0]
+        if got != value:
+            logger.warning(
+                "%s: %s (register 0x%02x) set to 0x%02x but reads 0x%02x",
+                self.label, name, register, value, got,
+            )
+
+    @staticmethod
+    def _clamp_picture(name: str, value: float) -> int:
+        low, high = PICTURE_RANGES[name]
+        return int(max(low, min(high, round(value))))
+
+    # ------------------------------------------------------------ controls
+    # The bridge's registers as technician sliders. Nothing here is
+    # automatic: exposure and colour are judged on the camera board, out of
+    # the host's reach, so there is no Auto -- Default is Keeler's values.
+
+    _CONTROL_GROUP = "Picture (the camera sets its own exposure and colour; these adjust its output)"
+    _CONTROL_LABELS = {
+        "contrast": "Contrast",
+        "brightness": "Brightness",
+        "saturation": "Saturation",
+        "red_balance": "Red",
+        "blue_balance": "Blue",
+        "sharpness": "Sharpness",
+    }
+
+    def controls(self) -> list:
+        from camera import ControlSpec
+
+        return [
+            ControlSpec(
+                key=name, label=label, minimum=PICTURE_RANGES[name][0], maximum=PICTURE_RANGES[name][1],
+                step=1, value=self._picture[name], group=self._CONTROL_GROUP,
+            )
+            for name, label in self._CONTROL_LABELS.items()
+        ]
+
+    def set_control(self, key: str, value: float) -> float:
+        if key not in PICTURE_REGISTERS:
+            raise KeyError(key)
+        self._picture[key] = self._clamp_picture(key, value)
+        if key == "brightness":
+            self._base_brightness = self._picture[key]
+        if self._dev is not None:
+            self._write_picture_register(key)
+        return float(self._picture[key])
+
+    def reset_controls(self, group: str) -> None:
+        if group != self._CONTROL_GROUP:
+            raise KeyError(group)
+        for name, value in PICTURE_DEFAULTS.items():
+            self.set_control(name, value)
 
     # ---------------------------------------------------------------- grab
 

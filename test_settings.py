@@ -1391,5 +1391,120 @@ class PreviewDialogCalibrationTest(unittest.TestCase):
         finally:
             dialog.close()
 
+
+class _FakeControlsCamera(SyntheticCamera):
+    """Two groups: one the camera can judge itself, one it can't."""
+
+    def __init__(self):
+        super().__init__(160, 120, fps=30)
+        self.values = {"balance_red": 1.0, "balance_blue": 1.0, "contrast": 16.0}
+        self.writes = []
+        self.resets = []
+
+    def controls(self):
+        from camera import ControlSpec
+
+        return [
+            ControlSpec("balance_red", "Red", 0.5, 3.0, 0.01, self.values["balance_red"], "White balance",
+                        auto=True, unit="×", decimals=2),
+            ControlSpec("balance_blue", "Blue", 0.5, 3.0, 0.01, self.values["balance_blue"], "White balance",
+                        auto=True, unit="×", decimals=2),
+            ControlSpec("contrast", "Contrast", 0, 31, 1, self.values["contrast"], "Picture"),
+        ]
+
+    def set_control(self, key, value):
+        self.values[key] = value
+        self.writes.append((key, value))
+        return value
+
+    def auto_controls(self, group):
+        from camera import ControlAutoError
+
+        if group != "White balance":
+            raise ControlAutoError("no")
+        self.values.update(balance_red=1.8, balance_blue=1.3)
+        return {"balance_red": 1.8, "balance_blue": 1.3}
+
+    def reset_controls(self, group):
+        self.resets.append(group)
+        if group == "White balance":
+            self.values.update(balance_red=1.0, balance_blue=1.0)
+
+
+class CameraControlsDialogTest(unittest.TestCase):
+    def _dialog(self, controls=None):
+        from settings import PreviewDialog
+
+        camera = _FakeControlsCamera()
+        dialog = PreviewDialog(camera, "Keeler", initial_controls=controls)
+        self.addCleanup(dialog._shutdown)
+        return dialog, camera
+
+    def test_saved_values_are_applied_and_the_sliders_open_there(self):
+        dialog, camera = self._dialog({"balance_red": 2.0})
+        self.assertTrue(dialog.controls_supported)
+        self.assertIn(("balance_red", 2.0), camera.writes)
+        _spec, slider, label = dialog._control_rows["balance_red"]
+        self.assertEqual(slider.value(), 150)
+        self.assertEqual(label.text(), "2.00 ×")
+        self.assertIn("auto:White balance", dialog._control_rows)
+        self.assertNotIn("auto:Picture", dialog._control_rows)  # nothing automatic to offer
+
+    def test_a_slider_writes_live_and_is_kept(self):
+        dialog, camera = self._dialog()
+        _spec, slider, _label = dialog._control_rows["contrast"]
+        slider.setValue(20)
+        self.assertEqual(camera.writes[-1], ("contrast", 20))
+        self.assertEqual(dialog.final_controls, {"contrast": 20})
+
+    def test_auto_moves_the_sliders_and_is_kept(self):
+        dialog, camera = self._dialog()
+        dialog._on_control_auto("White balance")
+        self.assertEqual(dialog.final_controls, {"balance_red": 1.8, "balance_blue": 1.3})
+        self.assertEqual(dialog._control_rows["balance_red"][1].value(), 130)
+        self.assertNotIn(("balance_red", 1.8), camera.writes)  # shown, not written back
+        self.assertIn("set", dialog.calibration_status_label.text())
+
+    def test_an_auto_that_cannot_judge_says_why_and_keeps_nothing(self):
+        dialog, camera = self._dialog()
+        dialog._on_control_auto("Picture")
+        self.assertEqual(dialog.final_controls, {})
+        self.assertIn("no", dialog.calibration_status_label.text())
+
+    def test_default_forgets_that_group_only(self):
+        dialog, camera = self._dialog({"balance_red": 2.0, "balance_blue": 0.8, "contrast": 20})
+        dialog._on_control_default("White balance")
+        self.assertEqual(camera.resets, ["White balance"])
+        self.assertEqual(dialog.final_controls, {"contrast": 20})
+        self.assertEqual(dialog._control_rows["balance_red"][1].value(), 50)
+
+    def test_a_camera_with_no_levers_shows_none(self):
+        from settings import PreviewDialog
+
+        dialog = PreviewDialog(SyntheticCamera(160, 120, fps=30), "Test")
+        self.addCleanup(dialog._shutdown)
+        self.assertFalse(dialog.controls_supported)
+
+
+class CameraControlsSaveTest(SettingsWindowTest):
+    def test_controls_are_saved_per_instrument_and_for_the_hands_camera(self):
+        window = self._make_window(ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE])
+        for key, device in (("slit_lamp", SLIT_LAMP_DEVICE), ("bio", BIO_DEVICE)):
+            window._instrument_rows[key].set_pending_selection(device.serial)
+        window._third_person_row.set_pending_selection(THIRD_PERSON_DEVICE.vid_pid)
+        window.rescan()
+        window._instrument_rows["slit_lamp"].set_controls({"balance_red": 1.4, "balance_blue": 0.9})
+        window._third_person_row.set_controls({"white_balance": 4500.0})
+        window._on_save_clicked()
+
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["instruments"]["slit_lamp"]["controls"], {"balance_red": 1.4, "balance_blue": 0.9})
+        self.assertNotIn("controls", saved["instruments"]["bio"])
+        self.assertEqual(saved["third_person"]["controls"], {"white_balance": 4500.0})
+
+        reopened = self._make_window(ids_devices=[SLIT_LAMP_DEVICE, BIO_DEVICE], uvc_devices=[THIRD_PERSON_DEVICE])
+        self.assertEqual(reopened._instrument_rows["slit_lamp"].controls(), {"balance_red": 1.4, "balance_blue": 0.9})
+        self.assertEqual(reopened._third_person_row.controls(), {"white_balance": 4500.0})
+
 if __name__ == "__main__":
     unittest.main()

@@ -132,3 +132,18 @@ PICTURE_DEFAULTS = {
     "red_balance": 0x00,
     "sharpness": 0x02,
 }
+
+# What a technician may set each register to, inclusive. Contrast and
+# saturation are 5-bit (masking measured 2026-09-13); the rest are Linux
+# em28xx's control limits, not measured here, which is why every write is
+# read back. Brightness and the two balances are signed bytes. Brightness
+# stops at +/-0x40: past 0x40 was never looked at, and the kiosk's
+# Brightness slider adds up to 0x30 on top of whatever is set here.
+PICTURE_RANGES = {
+    "contrast": (0x00, 0x1F),
+    "brightness": (-0x40, 0x40),
+    "saturation": (0x00, 0x1F),
+    "blue_balance": (-0x30, 0x30),
+    "red_balance": (-0x30, 0x30),
+    "sharpness": (0x00, 0x0F),
+}

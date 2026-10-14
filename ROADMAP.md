@@ -72,11 +72,6 @@ keep the numbers in the DECISIONS entry.
   Picture controls (DECISIONS 2026-09-29) are the instrument for this:
   whatever gamma, shadow tolerance and frame-rate budget prove right in
   the clinic become the presets, and the controls then come out again.
-- **Hands camera exposure.** Today the two-second warmup's result is frozen,
-  so every session starts from whatever the room looked like. Have
-  `settings.py` record the converged value at calibration time and
-  `uvc_camera` apply it at every start — a per-room value, so `config.json`
-  is its right home.
 
 ### Phase 2 — built; see Phase 1's first step for what remains
 

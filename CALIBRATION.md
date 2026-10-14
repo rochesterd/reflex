@@ -1,9 +1,8 @@
 # Camera setup after an install
 
-For the technician setting up a clinic machine, after the installer has
-run. Takes about 15 minutes for a two-instrument room. No imaging or
-photography knowledge is needed — everything you have to judge is written
-on screen in plain numbers.
+For the technician setting up a clinic machine, after the installer has run: about
+15 minutes for a two-instrument room. No imaging knowledge is needed — everything
+you have to judge is written on screen in plain numbers.
 
 Do this **at the instruments**, switched on and set up the way a student
 will use them: the app records what the camera sees, and it can only be
@@ -22,8 +21,8 @@ What each camera needs:
 |---|---|---|
 | Slit lamp | **Yes** — Auto-Calibrate | It has no automatic exposure of its own. |
 | BIO (newer Keeler, digital) | **Yes** — Auto-Calibrate | It has automatic exposure, but it runs the instant a student taps the instrument on the picker — before they've picked up the instrument or switched its light on. Calibrating here replaces that guess with a real measurement. |
-| BIO (older Keeler) | No — there is no button | Exposure is handled inside the camera itself, where no software can reach it. Nothing is missing; there is genuinely nothing to set. |
-| Third-person (webcam) | No | It sets its own exposure in the first two seconds after the recorder app starts. See step 8. |
+| BIO (older Keeler) | No — there is no button | Exposure and colour are handled inside the camera, where no software can reach. Its Preview has **Picture** sliders for the output; leave them unless it looks off. |
+| Third-person (webcam) | Recommended — Preview | Left alone it guesses its exposure each time the recorder starts. Step 8. |
 
 ---
 
@@ -51,11 +50,9 @@ third.
 The third-person row has no profile — any webcam works — so it's just the
 device.
 
-**Read the line under the row.** It tells you what that instrument needs,
-for example that the slit lamp has no automatic exposure of its own. If it
-says the profile usually reports a different camera model, you've most
-likely got the device or the profile wrong — check both, then carry on if
-you're sure; it won't stop you saving.
+**Read the line under the row.** It says what that instrument needs. If it
+says the profile usually reports a different camera model, the device or
+profile is likely wrong; check both. It won't stop you saving.
 
 **If your camera isn't in the profile list,** choose **Custom (unlisted
 camera)** and type a name yourself. Everything else works the same; the app
@@ -112,11 +109,15 @@ light, some blur on this view only) and calibrate again; raise **Steady the dark
 background shows as a dim neutral grey; tick **Remove the sensor's own black level** for
 black. Untick **Apply Reflex's picture processing** to compare. Save keeps what you leave.
 
+**White balance:** put something white or grey in the lit view and press **Auto** in the
+**White balance** box. If colours still look off, drag **Red** and **Blue**. **Default**
+hands it back to the camera.
+
 ### 6. Close Preview and repeat for the other instrument
 
 Close the Preview window. Repeat steps 3–5 for the second instrument.
 
-The older BIO has no Auto-Calibrate and no sliders: check picture and focus, and close.
+The older BIO has no Auto-Calibrate: check picture and focus. **Default** restores Keeler's values.
 
 ### 7. Save
 
@@ -129,10 +130,11 @@ is empty — an empty role means students won't see that instrument.
 
 Close Settings and start the recorder app from its Desktop shortcut.
 
-**Have the room lit normally and the third-person camera aimed at the
-student's working position before you launch it.** That camera fixes its
-own exposure in its first couple of seconds and holds it all session; if
-the room lighting changes a lot later, restart the app.
+**First, Preview the Third-Person row** with the room lit normally and the
+camera aimed at the working position: **Auto** under **Exposure** with
+hands in view, **Auto** under **White balance** holding a white card, then
+Save. Every session starts from those values; without them the camera
+guesses at each start.
 
 ### 9. Do one real test recording
 
@@ -152,8 +154,7 @@ This is the step that actually proves the install:
 6. With a USB drive plugged in, press **Export video...** and save to it —
    how students keep a recording, so it is part of the test.
 
-Repeat for the second instrument. If both play back well, the room is
-ready.
+Repeat for the second instrument. If both play back well, the room is ready.
 
 **Tell instructors:** Reflex keeps nothing. A recording lives only until
 the app is closed; a student who does not Export loses it.
@@ -181,5 +182,4 @@ Re-run the whole procedure whenever:
 - An instrument's illumination is serviced, or its bulb is changed.
 - The room's lighting is changed substantially.
 
-Settings is a normal, repeatable tool; running it again is always safe. A
-recalibration costs minutes; a stale one costs students recordings.
+Running Settings again is always safe. A recalibration costs minutes; a stale one costs students recordings.

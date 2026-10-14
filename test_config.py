@@ -828,5 +828,48 @@ class ProcessingSwitchTest(unittest.TestCase):
             load_config(self.path)
 
 
+
+class ControlsTest(unittest.TestCase):
+    """`controls`: a camera's levers, by kind (DECISIONS.md 2026-10-14)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "config.json"
+
+    def _write(self, slit_lamp=None, third_person=None, bio=None) -> None:
+        data = json.loads(json.dumps(VALID))
+        if slit_lamp is not None:
+            data["instruments"]["slit_lamp"]["controls"] = slit_lamp
+        if third_person is not None:
+            data["third_person"]["controls"] = third_person
+        if bio is not None:
+            data["instruments"]["bio"] = {"kind": "net2860_winusb", "label": "BIO", "controls": bio}
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_absent_is_empty_everywhere(self):
+        self._write()
+        cfg = load_config(self.path)
+        self.assertEqual(cfg.instruments["slit_lamp"].controls, {})
+        self.assertEqual(cfg.third_person.controls, {})
+
+    def test_each_kind_takes_its_own_levers(self):
+        self._write(slit_lamp={"balance_red": 1.4, "balance_blue": 2},
+                    third_person={"exposure": -6, "white_balance": 4500},
+                    bio={"contrast": 18, "red_balance": -4})
+        cfg = load_config(self.path)
+        self.assertEqual(cfg.instruments["slit_lamp"].controls, {"balance_red": 1.4, "balance_blue": 2.0})
+        self.assertEqual(cfg.third_person.controls, {"exposure": -6.0, "white_balance": 4500.0})
+        self.assertEqual(cfg.instruments["bio"].controls, {"contrast": 18.0, "red_balance": -4.0})
+
+    def test_a_lever_from_another_kind_or_a_non_number_is_refused(self):
+        for bad in ({"slit_lamp": {"exposure": -6}}, {"third_person": {"balance_red": 1.0}},
+                    {"bio": {"balance_red": 1.0}}, {"slit_lamp": {"balance_red": "1.2"}},
+                    {"slit_lamp": {"balance_red": True}}, {"slit_lamp": [1, 2]}):
+            with self.subTest(bad=bad):
+                self._write(**bad)
+                with self.assertRaises(ConfigError):
+                    load_config(self.path)
+
 if __name__ == "__main__":
     unittest.main()

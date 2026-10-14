@@ -197,5 +197,182 @@ class GainLatencyHoldTest(unittest.TestCase):
         self.assertIsNone(camera._pending_curve)
         self.assertEqual(camera._current_host_curve(), (None, None))
 
+
+class CurveForWhiteBalanceTest(unittest.TestCase):
+    """curve_for() with white balance gains: the pedestal stays neutral."""
+
+    def setUp(self):
+        from device_presets import FloorModel
+
+        self.floor = FloorModel((0.0497, 0.0375, 0.0527), (-0.0219, -0.0162, -0.0233),
+                                (0.00186, 0.00141, 0.00197), (0.00050, 0.00035, 0.00053))
+
+    def test_the_neutral_pedestal_survives_a_balance(self):
+        from ids_camera import curve_for
+
+        gains = (1.6, 1.0, 0.7)
+        curve = curve_for(1.8, 2.0, self.floor, 4095, tolerance=2.0, subtract_black=False, gains=gains)
+        measured = self.floor.black(2.0, 4095)
+        levels = [(b - off) * g for b, off, g in zip(measured, curve.black, gains)]
+        for level in levels:
+            self.assertAlmostEqual(level, sum(measured) / 3.0, places=6)
+        self.assertEqual(curve.gains, gains)
+
+
+class _FakeEnum:
+    def __init__(self, value):
+        self.value = value
+        self.converge_to = None
+
+    def SetCurrentEntry(self, value):
+        self.value = value
+        if value == "Once" and self.converge_to is not None:
+            self.converge_to()
+            self.value = "Off"
+
+    def CurrentEntry(self):
+        node = self
+
+        class _Entry:
+            def SymbolicValue(self):
+                return node.value
+        return _Entry()
+
+
+class _FakeRatio:
+    def __init__(self, selector, ratios):
+        self.selector, self.ratios = selector, ratios
+
+    def IsAvailable(self):
+        return True
+
+    def Minimum(self):
+        return 0.5
+
+    def Maximum(self):
+        return 3.0
+
+    def Value(self):
+        return self.ratios[self.selector.value]
+
+    def SetValue(self, value):
+        assert 0.5 <= value <= 3.0
+        self.ratios[self.selector.value] = value
+
+
+class _FakeNodeMap:
+    def __init__(self, nodes):
+        self.nodes = nodes
+
+    def TryFindNode(self, name):
+        return self.nodes.get(name)
+
+    def FindNode(self, name):
+        return self.nodes[name]
+
+
+@unittest.skipIf(ids_peak_ipl is None, "IDS peak bindings not installed")
+class WhiteBalanceControlsTest(unittest.TestCase):
+    """The white balance levers, on a node map shaped like the Keeler's
+    (writable ratios beside BalanceWhiteAuto) and like the slit lamp's
+    (no white balance nodes, raw 12-bit frames)."""
+
+    def _keeler(self, controls=None):
+        camera = IdsCamera(serial="unused", controls=controls)
+        selector = _FakeEnum("Red")
+        ratios = {"Red": 1.0, "Blue": 1.0}
+        auto = _FakeEnum("Continuous")
+        auto.converge_to = lambda: ratios.update(Red=1.8, Blue=1.3)
+        camera._node_map = _FakeNodeMap({
+            "BalanceWhiteAuto": auto, "BalanceRatioSelector": selector,
+            "BalanceRatio": _FakeRatio(selector, ratios),
+        })
+        camera._wb_mode = camera._detect_white_balance()
+        return camera, ratios, auto
+
+    def test_the_keeler_writes_its_own_ratios_and_turns_its_auto_off(self):
+        camera, ratios, auto = self._keeler()
+        self.assertEqual(camera._wb_mode, "device")
+        specs = {s.key: s for s in camera.controls()}
+        self.assertEqual(set(specs), {"balance_red", "balance_blue"})
+        self.assertEqual((specs["balance_red"].minimum, specs["balance_red"].maximum), (0.5, 3.0))
+        self.assertEqual(camera.set_control("balance_blue", 9.0), 3.0)  # clamped to the node
+        self.assertEqual(ratios["Blue"], 3.0)
+        self.assertEqual(auto.value, "Off")
+
+    def test_the_keelers_auto_is_its_own_once_then_read_back(self):
+        camera, ratios, _ = self._keeler()
+        self.assertEqual(camera.auto_controls("White balance"), {"balance_red": 1.8, "balance_blue": 1.3})
+        self.assertEqual(camera._controls, {"balance_red": 1.8, "balance_blue": 1.3})
+
+    def test_saved_ratios_are_what_a_reopened_keeler_holds(self):
+        camera, ratios, auto = self._keeler(controls={"balance_red": 2.2, "balance_blue": 0.9})
+        camera._write_device_balance(*camera._stored_balance())
+        self.assertEqual(ratios, {"Red": 2.2, "Blue": 0.9})
+        self.assertEqual(auto.value, "Off")
+
+    def _slit_lamp(self, controls=None):
+        camera = IdsCamera(serial="unused", controls=controls)
+        camera._node_map = _FakeNodeMap({})
+        camera._pixel_format = "BayerRG12"
+        camera._model_name = "UI325xCP-C"
+        camera._wb_mode = camera._detect_white_balance()
+        return camera
+
+    def test_the_slit_lamp_balances_in_the_host_tables(self):
+        camera = self._slit_lamp(controls={"balance_red": 1.5})
+        self.assertEqual(camera._wb_mode, "host")
+        self.assertEqual(camera._host_gains(), (1.5, 1.0, 1.0))
+        specs = camera.controls()
+        self.assertTrue(all(s.host_processing for s in specs))
+        self.assertEqual(camera.set_control("balance_blue", 10.0), 4.0)
+        self.assertEqual(camera._host_gains(), (1.5, 1.0, 4.0))
+
+    def test_the_slit_lamps_auto_judges_a_raw_frame(self):
+        from device_presets import floor_model_for_model
+
+        camera = self._slit_lamp()
+        camera.get_gain = lambda: 1.0
+        floor = floor_model_for_model("UI325xCP-C")
+        black = floor.black(1.0, 4095)
+        raw = np.zeros((80, 80), dtype=np.uint16)
+        raw[0::2, 0::2] = int(black[0] + 500)
+        raw[0::2, 1::2] = int(black[1] + 1000)
+        raw[1::2, 0::2] = int(black[1] + 1000)
+        raw[1::2, 1::2] = int(black[2] + 800)
+
+        def deliver():
+            camera._raw_snapshot = raw  # what _grab() does on the capture thread
+        import threading
+        original = camera._judge_host_balance
+
+        def judge():
+            # It clears the snapshot and asks for one; deliver after that.
+            threading.Timer(0.05, deliver).start()
+            return original()
+        camera._judge_host_balance = judge
+        values = camera.auto_controls("White balance")
+        self.assertAlmostEqual(values["balance_red"], 2.0, places=1)
+        self.assertAlmostEqual(values["balance_blue"], 1.25, places=1)
+
+    def test_default_puts_the_slit_lamp_back_to_unity(self):
+        camera = self._slit_lamp(controls={"balance_red": 1.5, "balance_blue": 0.8})
+        camera.reset_controls("White balance")
+        self.assertEqual(camera._host_gains(), (1.0, 1.0, 1.0))
+
+    def test_a_camera_with_only_its_own_auto_offers_nothing(self):
+        camera = IdsCamera(serial="unused")
+        camera._node_map = _FakeNodeMap({"BalanceWhiteAuto": _FakeEnum("Off")})
+        camera._pixel_format = "BayerRG8"
+        camera._wb_mode = camera._detect_white_balance()
+        self.assertIsNone(camera._wb_mode)
+        self.assertEqual(camera.controls(), [])
+
+    def test_config_knows_the_same_names(self):
+        from config import CONTROL_KEYS
+
+        camera, _, _ = self._keeler()
+        self.assertEqual({s.key for s in camera.controls()}, set(CONTROL_KEYS["ids"]))
+
 if __name__ == "__main__":
     unittest.main()

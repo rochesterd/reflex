@@ -191,6 +191,44 @@ class PictureRegisterTests(unittest.TestCase):
         # mid-sequence left behind. See DECISIONS.md 2026-09-13.
         self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["saturation"]], 0x0F)
 
+    def test_signed_values_are_written_as_bytes_and_ranges_clamp(self):
+        camera = self._camera(picture={"red_balance": -4, "contrast": 99})
+        camera._apply_picture()
+        self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["red_balance"]], 0xFC)
+        self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["contrast"]], 0x1F)
+
+    def test_controls_are_the_registers_and_write_live(self):
+        camera = self._camera()
+        keys = {spec.key for spec in camera.controls()}
+        self.assertEqual(keys, set(PICTURE_REGISTERS))
+        self.assertFalse(any(spec.auto for spec in camera.controls()))  # nothing here is automatic
+        self.assertEqual(camera.set_control("saturation", 40), 31.0)  # clamped to 5 bits
+        self.assertEqual(camera._dev.registers[PICTURE_REGISTERS["saturation"]], 0x1F)
+        with self.assertRaises(KeyError):
+            camera.set_control("exposure", 1)
+
+    def test_default_is_keelers_values(self):
+        camera = self._camera(picture={"brightness": 0x20, "sharpness": 9})
+        group = camera.controls()[0].group
+        camera.reset_controls(group)
+        for name, value in m.PICTURE_DEFAULTS.items():
+            self.assertEqual(camera._picture[name], value)
+
+    def test_the_kiosk_slider_starts_from_the_technicians_brightness(self):
+        camera = self._camera(picture={"brightness": 0x10})
+        camera.set_brightness(0.0)
+        self.assertEqual(camera._picture["brightness"], 0x10)
+        camera.set_brightness(1.0)
+        self.assertEqual(camera._picture["brightness"], 0x40)
+        camera.set_control("brightness", -8)
+        camera.set_brightness(0.0)
+        self.assertEqual(camera._picture["brightness"], -8)
+
+    def test_config_knows_the_same_names(self):
+        from config import CONTROL_KEYS
+
+        self.assertEqual(set(CONTROL_KEYS["net2860_winusb"]), set(PICTURE_REGISTERS))
+
     def test_an_override_replaces_only_what_it_names(self):
         camera = self._camera(picture={"brightness": 0x20})
         camera._apply_picture()
@@ -207,7 +245,10 @@ class PictureRegisterTests(unittest.TestCase):
     def test_a_masked_field_warns_rather_than_passing_silently(self):
         """Contrast and saturation ignore bits above 0x1f -- measured, not
         assumed -- so a value that cannot land must say so."""
-        camera = self._camera(picture={"contrast": 0x30})
+        camera = self._camera()
+        # Past the clamp on purpose: the readback is the backstop for a
+        # register narrower than PICTURE_RANGES says.
+        camera._picture["contrast"] = 0x30
         camera._dev = self._FakeDevice(masks={PICTURE_REGISTERS["contrast"]: 0x1F})
 
         with self.assertLogs("net2860_winusb_camera", level="WARNING") as logs:
