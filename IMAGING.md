@@ -67,10 +67,9 @@ is the first row of each camera unless a row says otherwise.
   only if something moved it into a range 256 levels can carry — which is
   what a tone curve does and what more capture bits alone do not.
 
-## Measured, 2026-09-13
+## Measured
 
-Answers to what this section used to list as unknown. See DECISIONS.md's
-2026-09-13 entries for how each was measured.
+2026-09-13 unless dated; DECISIONS.md's entries of each date say how.
 
 - **Everything is writable at open.** Region of interest, binning,
   decimation, mirroring, pixel format and the throughput cap read as
@@ -91,16 +90,10 @@ Answers to what this section used to list as unknown. See DECISIONS.md's
   every open.** All three have to be applied in `IdsCamera._open()`.
 - **Host CPU:** 54% of one core for the slit lamp at 38fps free-running,
   28% for the Keeler at 20fps, capture only.
-
 - **Bit depth costs no frame rate.** Both cameras hold 30fps with zero
   dropped frames at every depth they offer, up to the Keeler's unpacked
   12-bit at 190 MB/s. The cost is host CPU: roughly 45% of one core at
   8-bit, 60% at 12-bit, for the debayer.
-- **But switching pixel format alone changes nothing downstream.**
-  `_grab()` converts each buffer to BGR8 immediately, so a 12-bit capture
-  arrives with the same 248 distinct levels as an 8-bit one. The extra bits
-  are only worth anything if a tone curve is applied *before* that
-  conversion, which `ids_camera._to_bgr8()` now does.
 - **The host raw path** (`tone_curve.py`: motion-gated frame averaging,
   per-channel 12-bit lookup tables, host demosaic): 16ms a frame at
   1600x1200 with a 4-frame average, 9.3ms without. A 12-bit capture keeps
@@ -114,3 +107,14 @@ Answers to what this section used to list as unknown. See DECISIONS.md's
   unit of gain; temporal sigma rises ~7.6 / 5.8 / 8.1 per unit of gain;
   fixed pattern (rows, columns) stays under 5 at gain 3. The floor is not
   neutral, and it is 19-24% of full scale at gain 3.
+- **The older BIO's bridge beyond `R20`-`R25`** (2026-11-09, bit by bit,
+  live). Window: `R1C`/`R1D` start (pixels / field lines), `R1E`/`R1F`
+  size (units of 4, capped at ~722x288), `R1B` bits 0-1 their high bits;
+  `R1B` bit 7 halves the field rate. Scaler: `R26` bits 4/5 enable (off),
+  `R30`-`R33` give size = native x 4096 / (4096 + factor). `R27`: bit 4
+  swaps Y/UV order, bits 2/3 give 8/12 bits per pixel. Inert: `R0D`,
+  `R0F`, `R13`-`R1A`, `R28`-`R2B`, `R34`-`R37`, `R3E`-`R3F`. Ignore
+  writes: `R0B`, `R38`-`R3D` (read 00), `R2C`-`R2F` (read 93). Unprobed:
+  `R00`-`R0A`, `R0C`, `R0E`, `R10`-`R12`.
+- **Every bridge register resets at power-off** (picture `08 08 0a 44 a0
+  00`, a colour cast; format and capture enable 00); `_open()` replays all.

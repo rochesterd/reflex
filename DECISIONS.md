@@ -5808,3 +5808,45 @@ target; the legacy BIO's unmeasured ranges; the ELP's ranges and every
 webcam Auto on a lit scene (the laptop camera faced a dark room).
 
 ---
+
+## 2026-11-09 — The legacy BIO's other bridge registers: mapped, and no code change
+
+**Asked:** could we read the older BIO's EM2860 registers, and work out
+what the ones beyond the picture registers (2026-09-13) do.
+
+**Method.** `tools/net2860_identity.py` dumps `R00`-`R3F`. A marker
+written to the picture registers did not survive a replug, so a bad write
+costs at most a replug. That made it safe to toggle each bit of every
+register the init sequence touches, one at a time on a live stream, and
+measure the **raw** isochronous fields (length, rate, Y/U/V, pixel
+difference from a baseline frame) rather than the decoded frame, whose
+assembler drops short fields and would hide a geometry change. The
+results are in IMAGING.md's "Measured".
+
+**What it settled.**
+- Linux em28xx's names hold where they say anything: window, scaler and
+  format behave as named, and the scaler's size matches Linux's formula
+  exactly (654x143 from Keeler's factors). `R28`-`R2B` are a statistics
+  window, not a crop -- an earlier guess, wrong.
+- Gamma and the RGB gains/offsets (`R14`-`R1A`) have no effect on this
+  board's BT.656 YUV input, so `R20`-`R25` are the only picture
+  processing on the path. `START_WRITES` hides no other adjustment.
+- The bridge holds nothing across power-off: the power-on picture is
+  `08 08 0a 44 a0 00`, a visible colour cast, the opposite of GenICam's
+  persistence (CLAUDE.md's "The app holds the values").
+
+**Why no code changed.** The decoder's `FIELD_BYTES` already matches what
+`START_WRITES` sets; every `_open()` replays the whole sequence; and a
+wrong format or window shows up as fields of the wrong length, dropped as
+short and caught by the kiosk's stall detection, so reading back all 58
+writes at open would check what is already checked. Cropping or scaling
+in the bridge would save bandwidth no one is short of.
+
+**Left open.** `R1B` bit 7 halves the field rate (alternate fields
+dropped, or a slower clock -- not checked). `R0D`, `R13`, `R3E`, `R3F`
+take writes with no measurable effect. `R00`-`R0A`, `R0C`, `R0E` and
+`R10`-`R12` (chip config and capture enable) were not probed, as the
+ones most likely to stop the stream. The probe was throwaway; its
+method above is enough to redo it.
+
+---

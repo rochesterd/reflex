@@ -24,10 +24,12 @@ Consequences worth knowing:
   offered none either (audited 2026-09-11).
 - What the host *can* set is the bridge's own video processing: EM2860
   registers 0x20-0x25 are contrast, brightness, saturation, blue/red
-  balance and sharpness (Linux em28xx-reg.h), and START_WRITES replays
-  Keeler's values for them. Post-processing on the digitised stream, not
-  sensor control -- and unconfirmed against this hardware. See
-  DECISIONS.md's 2026-09-11 entry and ROADMAP.md before changing one.
+  balance and sharpness, confirmed on hardware, applied after the bring-up
+  from net2860_init.PICTURE_DEFAULTS (Keeler's values). Post-processing on
+  the digitised stream, not sensor control. They are the only picture
+  processing on this path, and every register resets at power-off, so
+  _open() replays them all -- see IMAGING.md and DECISIONS.md's
+  2026-09-13 and 2026-11-09 entries before changing one.
 - Frame.index comes from the *hardware*: each field header carries a
   counter that wraps at 128, unwrapped here into a monotonic frame number.
   Unlike UvcCamera -- which self-counts and therefore looks drop-free by
