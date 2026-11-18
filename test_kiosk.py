@@ -67,6 +67,26 @@ class _FreezablePictureCamera(SyntheticCamera):
         return super()._render(elapsed, frame_index)
 
 
+class _AlternatingPictureCamera(SyntheticCamera):
+    """A camera stuck replaying two buffers -- A, B, A, B -- while its
+    frame counter climbs: what a driver that has lost its sensor can do.
+    Every frame differs from the one before it, so a check that compares
+    only consecutive frames calls it live.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._loop = None
+
+    def start_looping(self) -> None:
+        self._loop = (super()._render(0.0, 0), super()._render(1.0, 1))
+
+    def _render(self, elapsed: float, frame_index: int):
+        if self._loop is not None:
+            return self._loop[frame_index % 2]
+        return super()._render(elapsed, frame_index)
+
+
 class _FailOnceCamera(SyntheticCamera):
     """Fails _open() exactly once, then behaves like a normal
     SyntheticCamera -- for exercising a failed instrument switch.
@@ -439,6 +459,31 @@ class TestFrozenCameraDetection(unittest.TestCase):
                 third.stop()
                 instrument.stop()
 
+    def test_a_camera_replaying_two_frames_counts_as_frozen(self):
+        with tempfile.TemporaryDirectory() as tmp_root:
+            third = _AlternatingPictureCamera(160, 120, fps=30, name="third")
+            instrument = SyntheticCamera(160, 120, fps=30, name="instrument")
+            third.start_looping()
+            third.start()
+            instrument.start()
+            try:
+                clock = FakeClock()
+                controller = self._controller(tmp_root, third, instrument, clock)
+                controller.select_instrument("instrument")
+                time.sleep(0.2)
+                controller.poll_preflight()  # baseline
+                status = None
+                for _ in range(6):
+                    time.sleep(0.1)
+                    clock.advance(0.5)
+                    status = controller.poll_preflight()
+
+                self.assertEqual(status.frozen_cameras, ("third_person",))
+                self.assertFalse(status.ok)
+            finally:
+                third.stop()
+                instrument.stop()
+
     def test_deselecting_an_instrument_drops_its_freshness_history(self):
         with tempfile.TemporaryDirectory() as tmp_root:
             third = SyntheticCamera(160, 120, fps=30, name="third")
@@ -454,10 +499,10 @@ class TestFrozenCameraDetection(unittest.TestCase):
                 controller.select_instrument("a")
                 time.sleep(0.2)
                 controller.poll_preflight()
-                self.assertIn("instrument", controller._last_signature)
+                self.assertIn("instrument", controller._recent_signatures)
 
                 controller.select_instrument("b")
-                self.assertEqual(controller._last_signature, {})
+                self.assertEqual(controller._recent_signatures, {})
             finally:
                 third.stop()
                 for cam in (cam_a, cam_b):

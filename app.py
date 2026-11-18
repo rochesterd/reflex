@@ -48,7 +48,7 @@ from config import (
     load_config,
 )
 from device_presets import CUSTOM_PROFILE_ID, profile_for_id
-from kiosk import KioskController, PreflightStatus, State
+from kiosk import KioskController, PreflightStatus, State, set_keep_awake
 from neco_reflex_theme import BURGUNDY_BGR
 from qt_image import bgr_to_pixmap
 from reflex_mark import ReflexMark
@@ -616,6 +616,11 @@ class KioskWindow(QMainWindow):
             logger.error("streaming unavailable: %s", exc)
             self._sink = None
             self._sink_error = str(exc)
+            return
+        # Panopto may be recording for as long as the feed is up, so this
+        # is the stream-mode equivalent of a recording in progress: a
+        # sleeping display or machine can take the cameras with it.
+        set_keep_awake(True)
 
     def _stream_faults(self, preflight: PreflightStatus | None) -> dict[str, str]:
         """What the virtual feed should slate out, from the same preflight
@@ -882,6 +887,7 @@ class KioskWindow(QMainWindow):
 
         if self._sink is not None:
             self._sink.stop()
+            set_keep_awake(False)
         self.preview_timer.stop()
         self.poll_timer.stop()
         self.camera_retry_timer.stop()

@@ -15,6 +15,7 @@ import logging
 import shutil
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -84,6 +85,12 @@ DEFAULT_FREEZE_TIMEOUT_S = 5.0
 # thousands of independent pixels, so live sensor noise cannot hide from
 # it.
 _FRESHNESS_SAMPLES_PER_AXIS = 64
+
+# How many recent signatures a new frame must differ from to count as
+# fresh. Not just the previous one: a driver that has lost its sensor can
+# cycle its last few buffers (A, B, A, B...), and every frame then differs
+# from the one before it. Each entry is ~12 KB, so this is cheap.
+_FRESHNESS_HISTORY = 16
 
 
 def _frame_signature(image):
@@ -171,7 +178,8 @@ def set_keep_awake(active: bool) -> None:
     cameras with it. Students reported the screen sleeping about two
     minutes into a session -- the capture threads carried on correctly, but
     a preview that vanishes looks like a fault, and a full sleep would not
-    have been survivable.
+    have been survivable. Stream mode holds it for as long as the virtual
+    camera is up (app.py), since Panopto may be recording all that time.
 
     Best-effort, like every other platform call here: not Windows, or the
     call fails, and recording proceeds exactly as before.
@@ -279,9 +287,9 @@ class KioskController:
         self._recording_started_at: float | None = None
         self._last_index: dict[str, int] = {"instrument": -1, "third_person": -1}
         self._last_progress_time: dict[str, float] = {}
-        # Freshness: the last frame signature seen per camera, and when it
-        # last actually changed. See _update_freshness().
-        self._last_signature: dict[str, np.ndarray] = {}
+        # Freshness: the recent frame signatures seen per camera, and when
+        # the picture last actually changed. See _update_freshness().
+        self._recent_signatures: dict[str, deque[np.ndarray]] = {}
         self._last_change_time: dict[str, float] = {}
         self._last_fresh_index: dict[str, int] = {}
 
@@ -429,7 +437,7 @@ class KioskController:
         return cameras
 
     def _reset_freshness(self) -> None:
-        self._last_signature.clear()
+        self._recent_signatures.clear()
         self._last_change_time.clear()
         self._last_fresh_index.clear()
 
@@ -450,9 +458,9 @@ class KioskController:
         """
         frozen: list[str] = []
         active = self._active_cameras()
-        for key in list(self._last_signature):
+        for key in list(self._recent_signatures):
             if key not in active:  # e.g. the instrument was deselected
-                self._last_signature.pop(key, None)
+                self._recent_signatures.pop(key, None)
                 self._last_change_time.pop(key, None)
                 self._last_fresh_index.pop(key, None)
 
@@ -470,9 +478,15 @@ class KioskController:
                 continue
             self._last_fresh_index[key] = frame.index
             signature = _frame_signature(frame.image)
-            previous = self._last_signature.get(key)
-            if previous is None or previous.shape != signature.shape or not np.array_equal(previous, signature):
-                self._last_signature[key] = signature
+            recent = self._recent_signatures.get(key)
+            if recent is None or recent[-1].shape != signature.shape:
+                recent = self._recent_signatures[key] = deque(maxlen=_FRESHNESS_HISTORY)
+            # Fresh means unlike *every* recent frame, not just the last: a
+            # replayed buffer ring alternates between a few images that each
+            # differ from their predecessor. A live sensor never reproduces
+            # any earlier frame exactly, so this costs no false positives.
+            if not any(np.array_equal(old, signature) for old in recent):
+                recent.append(signature)
                 self._last_change_time[key] = now
             elif now - self._last_change_time[key] >= self.freeze_timeout_s:
                 frozen.append(key)
